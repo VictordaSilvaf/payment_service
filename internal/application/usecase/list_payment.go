@@ -17,8 +17,8 @@ func NewListPayment(repo payment.Repository) *ListPayment {
 	return &ListPayment{repo: repo}
 }
 
-func (uc *ListPayment) Execute(ctx context.Context, page, limit, sort, order, search string) (*dto.PaginatedResponse, error) {
-	pageResult, err := uc.repo.FindAll(ctx, page, limit, sort, order, search)
+func (uc *ListPayment) Execute(ctx context.Context, page, limit, sort, order, status string) (*dto.PaginatedResponse, error) {
+	pageResult, err := uc.repo.FindAll(ctx, page, limit, sort, order, status)
 	if err != nil {
 		return nil, err
 	}

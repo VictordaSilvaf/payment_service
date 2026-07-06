@@ -13,6 +13,7 @@ API REST em Go para gerenciamento de pagamentos, construída com **Domain-Driven
 - [Fluxogramas](#fluxogramas)
 - [Endpoints da API](#endpoints-da-api)
 - [Como rodar](#como-rodar)
+- [Migrations, factories e seeders](#migrations-factories-e-seeders)
 - [Variáveis de ambiente](#variáveis-de-ambiente)
 - [Banco de dados](#banco-de-dados)
 - [Docker](#docker)
@@ -23,7 +24,7 @@ API REST em Go para gerenciamento de pagamentos, construída com **Domain-Driven
 
 O **Payment Service** expõe uma API HTTP para criar, consultar e listar pagamentos. Cada pagamento possui valor (`amount`), moeda (`currency`) e status (`pending`, `completed`, `failed`).
 
-A aplicação persiste os dados no **PostgreSQL** e está preparada para integração futura com **Redis** (cache/sessões).
+A aplicação persiste os dados no **PostgreSQL** (via adapter `pgx`) e está preparada para integração futura com **Redis** (cache/sessões).
 
 ---
 
@@ -34,6 +35,7 @@ A aplicação persiste os dados no **PostgreSQL** e está preparada para integra
 | **Go 1.26** | Linguagem principal |
 | **Gin** | Framework HTTP |
 | **pgx/v5** | Driver PostgreSQL |
+| **golang-migrate** | Migrations versionadas |
 | **PostgreSQL 16** | Persistência de pagamentos |
 | **Redis 7** | Infraestrutura disponível (ainda não integrada na aplicação) |
 | **Docker Compose** | Orquestração de containers |
@@ -84,7 +86,7 @@ flowchart TB
 | **Application** | Orquestração via use cases e DTOs | Domain |
 | **Infrastructure** | HTTP, banco de dados, config | Application + Domain |
 
-> O domínio e a aplicação **nunca** importam Gin ou PostgreSQL diretamente. Apenas o `cmd/api/main.go` faz o wiring das dependências (composition root).
+> O domínio e a aplicação **nunca** importam Gin ou PostgreSQL diretamente. Apenas os entrypoints em `cmd/` fazem o wiring das dependências (composition root).
 
 ---
 
@@ -92,29 +94,38 @@ flowchart TB
 
 ```
 payment_service/
-├── cmd/api/main.go                          # Composition root (bootstrap)
+├── cmd/
+│   ├── api/main.go                          # Composition root da API
+│   ├── migrate/main.go                      # CLI de migrations
+│   └── seed/main.go                         # CLI de seeders
+├── db/migrations/                           # SQL versionado (golang-migrate)
 ├── internal/
 │   ├── domain/payment/                      # Núcleo do domínio
 │   │   ├── payment.go                       # Entidade
 │   │   ├── money.go                         # Value object
 │   │   ├── status.go                        # Value object
-│   │   ├── errors.go                        # Erros de domínio
+│   │   ├── page.go                          # Resultado paginado
+│   │   ├── errors.go
 │   │   └── repository.go                    # Porta (interface)
 │   ├── application/
 │   │   ├── dto/                             # Objetos de transferência
 │   │   └── usecase/                         # Casos de uso
+│   ├── database/
+│   │   ├── migrate/                         # Runner de migrations
+│   │   ├── factory/                         # Factories de dados fake
+│   │   └── seeder/                          # Seeders
 │   └── infrastructure/
-│       ├── config/                          # Configuração via env vars
+│       ├── config/
 │       ├── http/                            # Adapter HTTP (Gin)
 │       └── persistence/
-│           ├── postgres/                    # Adapter PostgreSQL
+│           ├── postgres/                    # Adapter PostgreSQL (produção)
 │           └── memory/                      # Adapter in-memory
-├── scripts/postgres/init.sql                # Schema inicial
 ├── docker-compose.yml                       # Orquestração (produção)
 ├── docker-compose.override.yml              # Hot-reload (dev, auto-carregado)
 ├── Dockerfile                               # Build de produção
 ├── Dockerfile.dev                           # Build de desenvolvimento (Air)
-└── .air.toml                                # Configuração do hot-reload
+├── .air.toml                                # Configuração do hot-reload
+└── Makefile                                 # Atalhos (migrate, seed, run)
 ```
 
 ---
@@ -156,13 +167,13 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Client->>Handler: GET /api/v1/payments?page=1&limit=10
-    Handler->>UC: Execute(ctx, page, limit, sort, order, search)
+    Handler->>UC: Execute(ctx, page, limit, sort, order, status)
     UC->>Repo: FindAll(ctx, params...)
-    Repo->>DB: SELECT ... LIMIT/OFFSET
-    DB-->>Repo: rows
-    Repo-->>UC: []*Payment
-    UC-->>Handler: []*PaymentResponse
-    Handler->>Handler: Monta PaginatedResponse
+    Repo->>DB: COUNT(*) + SELECT ... LIMIT/OFFSET
+    DB-->>Repo: total + rows
+    Repo-->>UC: PageResult{Items, Total}
+    UC->>UC: Monta PaginatedResponse
+    UC-->>Handler: *PaginatedResponse
     Handler-->>Client: 200 OK
 ```
 
@@ -252,7 +263,7 @@ curl http://localhost:8080/api/v1/payments/{id}
 **Listar (com paginação)**
 
 ```bash
-curl "http://localhost:8080/api/v1/payments?page=1&limit=10&sort=created_at&order=desc"
+curl "http://localhost:8080/api/v1/payments?page=1&limit=10&sort=created_at&order=desc&status=pending"
 ```
 
 ```json
@@ -268,10 +279,12 @@ curl "http://localhost:8080/api/v1/payments?page=1&limit=10&sort=created_at&orde
   ],
   "page": "1",
   "limit": "10",
-  "total": 1,
-  "total_pages": 1
+  "total": 25,
+  "total_pages": 3
 }
 ```
+
+> `total` e `total_pages` refletem o **total de registros no banco** (com filtros aplicados), não apenas os itens da página atual.
 
 #### Query params da listagem
 
@@ -281,7 +294,7 @@ curl "http://localhost:8080/api/v1/payments?page=1&limit=10&sort=created_at&orde
 | `limit` | `10` | Itens por página |
 | `sort` | `created_at` | Coluna de ordenação (`id`, `amount`, `currency`, `status`, `created_at`) |
 | `order` | `desc` | Direção (`asc` ou `desc`) |
-| `search` | — | Filtro por ID ou status |
+| `status` | — | Filtro opcional por status (`pending`, `completed`, `failed`) |
 
 ---
 
@@ -309,15 +322,17 @@ O arquivo `docker-compose.override.yml` é carregado automaticamente e configura
 docker compose logs -f api
 ```
 
+> Se o build falhar com `error obtaining VCS status`, o `.air.toml` já inclui `-buildvcs=false` para contornar isso dentro do Docker.
+
 ### Produção (build otimizado)
 
 ```bash
 docker compose -f docker-compose.yml up --build -d
 ```
 
-Usa o `Dockerfile` multi-stage (imagem Alpine ~15 MB), sem hot-reload.
+Usa o `Dockerfile` multi-stage (imagem Alpine enxuta), sem hot-reload.
 
-### Rodar localmente (sem Docker)
+### Rodar localmente (sem Docker na API)
 
 ```bash
 # Subir apenas Postgres e Redis
@@ -326,8 +341,55 @@ docker compose up postgres redis -d
 # Configurar env vars
 cp .env.example .env
 
+# Aplicar migrations e popular dados (opcional)
+make migrate-up
+make seed
+
 # Rodar a API
 go run ./cmd/api
+```
+
+---
+
+## Migrations, factories e seeders
+
+### Migrations
+
+Schema gerenciado por **golang-migrate** em `db/migrations/`. A API executa `migrate up` automaticamente ao iniciar.
+
+```bash
+make migrate-up          # aplicar migrations
+make migrate-down        # reverter tudo
+go run ./cmd/migrate version   # ver versão atual
+go run ./cmd/migrate steps -1  # reverter 1 migration
+```
+
+### Factories
+
+Gera pagamentos fake para testes e seeders:
+
+```go
+factory := factory.NewPaymentFactory()
+
+p := factory.Make()
+
+p := factory.NewPaymentFactory().
+    WithAmount(5000).
+    WithCurrency("BRL").
+    WithStatus(payment.StatusCompleted).
+    Make()
+
+payments := factory.NewPaymentFactory().MakeMany(10)
+```
+
+### Seeders
+
+```bash
+make seed                # insere 25 pagamentos
+make seed-fresh          # limpa a tabela e reinsere 25 pagamentos
+
+go run ./cmd/seed -count=50
+go run ./cmd/seed -count=25 -fresh
 ```
 
 ---
@@ -345,6 +407,7 @@ go run ./cmd/api
 | `POSTGRES_DB` | `payment_db` | Nome do banco |
 | `REDIS_HOST` | `localhost` | Host do Redis |
 | `REDIS_PORT` | `6379` | Porta do Redis |
+| `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
 > Dentro do Docker Compose, `POSTGRES_HOST=postgres` e `REDIS_HOST=redis` (nomes dos serviços na rede interna).
 
@@ -352,7 +415,7 @@ go run ./cmd/api
 
 ## Banco de dados
 
-O schema é criado automaticamente na primeira inicialização do container Postgres via `scripts/postgres/init.sql`:
+O schema é versionado em `db/migrations/`:
 
 ```sql
 CREATE TABLE payments (
@@ -365,6 +428,14 @@ CREATE TABLE payments (
 ```
 
 Os dados ficam no volume Docker `postgres_data` e **persistem** entre restarts da API.
+
+```bash
+# Acessar o banco
+docker exec -it payment_postgres psql -U payment -d payment_db
+
+# Verificar migrations
+docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM schema_migrations;"
+```
 
 ---
 
@@ -392,9 +463,6 @@ docker compose down
 
 # Parar e remover volumes (apaga dados!)
 docker compose down -v
-
-# Acessar o banco
-docker exec -it payment_postgres psql -U payment -d payment_db
 ```
 
 ### Modos de build
@@ -410,7 +478,6 @@ docker exec -it payment_postgres psql -U payment -d payment_db
 
 - [ ] Integrar Redis (cache de consultas, rate limiting)
 - [ ] Use cases: completar/falhar pagamento
-- [ ] Endpoint DELETE
+- [ ] Endpoint DELETE exposto na API
 - [ ] Testes unitários e de integração
-- [ ] Migrations com ferramenta dedicada (ex: golang-migrate)
 - [ ] CI/CD pipeline

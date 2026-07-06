@@ -58,7 +58,7 @@ func (h *PaymentHandler) List(c *gin.Context) {
 		c.Query("limit"),
 		c.Query("sort"),
 		c.Query("order"),
-		c.Query("search"),
+		c.Query("status"),
 	)
 	if err != nil {
 		h.handleError(c, err)
