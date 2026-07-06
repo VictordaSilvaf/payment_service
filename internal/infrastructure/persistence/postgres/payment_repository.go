@@ -106,6 +106,14 @@ func (r *PaymentRepository) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func (r *PaymentRepository) Truncate(ctx context.Context) error {
+	_, err := r.pool.Exec(ctx, `TRUNCATE TABLE payments`)
+	if err != nil {
+		return fmt.Errorf("truncate payments: %w", err)
+	}
+	return nil
+}
+
 type scannable interface {
 	Scan(dest ...any) error
 }

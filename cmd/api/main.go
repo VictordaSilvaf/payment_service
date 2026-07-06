@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"payment_service/internal/application/usecase"
+	"payment_service/internal/database/migrate"
 	"payment_service/internal/infrastructure/config"
 	"payment_service/internal/infrastructure/http"
 	"payment_service/internal/infrastructure/http/handler"
@@ -13,6 +14,10 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	if err := migrate.Up(cfg.Postgres.DSN()); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := context.Background()
 
