@@ -1,0 +1,14 @@
+# Carregado automaticamente em `docker compose up` para desenvolvimento local.
+# Hot-reload: alterações em .go reiniciam a API sem rebuild da imagem.
+# Produção: docker compose -f docker-compose.yml up --build
+services:
+  api:
+    build:
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - go_mod_cache:/go/pkg/mod
+    restart: "no"
+
+volumes:
+  go_mod_cache:
