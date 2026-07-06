@@ -2,8 +2,8 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/api ./cmd/api"
-  bin = "./tmp/api"
+  cmd = "go build -buildvcs=false -o ./tmp/api ./cmd/api"
+  entrypoint = "./tmp/api"
   include_ext = ["go"]
   exclude_dir = ["tmp", "vendor"]
   delay = 500
