@@ -38,6 +38,8 @@ A aplicação persiste os dados no **PostgreSQL** (via adapter `pgx`) e está pr
 | **golang-migrate** | Migrations versionadas |
 | **PostgreSQL 16** | Persistência de pagamentos |
 | **Redis 7** | Infraestrutura disponível (ainda não integrada na aplicação) |
+| **RabbitMQ 3.13** | Publicação de eventos (`payment.created`) |
+| **amqp091-go** | Cliente AMQP |
 | **Docker Compose** | Orquestração de containers |
 | **Air** | Hot-reload em desenvolvimento |
 
@@ -117,6 +119,7 @@ payment_service/
 │   └── infrastructure/
 │       ├── config/
 │       ├── http/                            # Adapter HTTP (Gin)
+│       ├── messaging/rabbitmq/              # Adapter RabbitMQ (eventos)
 │       └── persistence/
 │           ├── postgres/                    # Adapter PostgreSQL (produção)
 │           └── memory/                      # Adapter in-memory
@@ -151,7 +154,7 @@ sequenceDiagram
     UC->>Repo: Save(ctx, payment)
     Repo->>DB: INSERT INTO payments
     DB-->>Repo: OK
-    Repo-->>UC: nil
+    UC->>UC: PublishCreated (RabbitMQ)
     UC-->>Handler: PaymentResponse
     Handler-->>Client: 201 Created
 ```
@@ -189,14 +192,17 @@ flowchart LR
         API["payment_api\n(Go + Air)"]
         PG["payment_postgres\n(PostgreSQL 16)"]
         RD["payment_redis\n(Redis 7)"]
+        RMQ["payment_rabbitmq\n(RabbitMQ 3.13)"]
     end
 
     Client -->|:8080| API
     API -->|:5432| PG
+    API -->|:5672| RMQ
     API -.->|futuro| RD
 
     PG --- VolPG[("postgres_data\n(volume)")]
     RD --- VolRD[("redis_data\n(volume)")]
+    RMQ --- VolRMQ[("rabbitmq_data\n(volume)")]
 ```
 
 ### Ciclo de dependências (Hexagonal)
@@ -407,9 +413,16 @@ go run ./cmd/seed -count=25 -fresh
 | `POSTGRES_DB` | `payment_db` | Nome do banco |
 | `REDIS_HOST` | `localhost` | Host do Redis |
 | `REDIS_PORT` | `6379` | Porta do Redis |
+| `RABBITMQ_HOST` | `localhost` | Host do RabbitMQ |
+| `RABBITMQ_PORT` | `5672` | Porta AMQP |
+| `RABBITMQ_MANAGEMENT_PORT` | `15672` | Porta do painel web |
+| `RABBITMQ_USER` | `payment` | Usuário RabbitMQ |
+| `RABBITMQ_PASSWORD` | `payment` | Senha RabbitMQ |
+| `RABBITMQ_EXCHANGE` | `payment.events` | Exchange de eventos |
+| `RABBITMQ_QUEUE` | `payment.created` | Fila de pagamentos criados |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
-> Dentro do Docker Compose, `POSTGRES_HOST=postgres` e `REDIS_HOST=redis` (nomes dos serviços na rede interna).
+> Dentro do Docker Compose, use os nomes dos serviços: `POSTGRES_HOST=postgres`, `REDIS_HOST=redis`, `RABBITMQ_HOST=rabbitmq`.
 
 ---
 
@@ -448,6 +461,15 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 | `api` | `payment_api` | 8080 | API Go |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Cache (futuro) |
+| `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
+
+Painel RabbitMQ: [http://localhost:15672](http://localhost:15672) (user/pass: `payment`/`payment`)
+
+### Eventos publicados
+
+| Evento | Exchange | Routing key | Payload |
+|---|---|---|---|
+| Pagamento criado | `payment.events` | `payment.created` | `{ id, amount, currency, status, created_at }` |
 
 ### Comandos úteis
 
@@ -476,6 +498,7 @@ docker compose down -v
 
 ## Próximos passos
 
+- [ ] Consumer RabbitMQ (processar eventos assíncronos)
 - [ ] Integrar Redis (cache de consultas, rate limiting)
 - [ ] Use cases: completar/falhar pagamento
 - [ ] Endpoint DELETE exposto na API

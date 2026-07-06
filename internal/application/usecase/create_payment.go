@@ -8,11 +8,12 @@ import (
 )
 
 type CreatePayment struct {
-	repo payment.Repository
+	repo      payment.Repository
+	publisher payment.EventPublisher
 }
 
-func NewCreatePayment(repo payment.Repository) *CreatePayment {
-	return &CreatePayment{repo: repo}
+func NewCreatePayment(repo payment.Repository, publisher payment.EventPublisher) *CreatePayment {
+	return &CreatePayment{repo: repo, publisher: publisher}
 }
 
 func (uc *CreatePayment) Execute(ctx context.Context, req dto.CreatePaymentRequest) (*dto.PaymentResponse, error) {
@@ -25,15 +26,11 @@ func (uc *CreatePayment) Execute(ctx context.Context, req dto.CreatePaymentReque
 		return nil, err
 	}
 
-	return toPaymentResponse(p), nil
-}
-
-func toPaymentResponse(p *payment.Payment) *dto.PaymentResponse {
-	return &dto.PaymentResponse{
-		ID:        p.ID,
-		Amount:    p.Money.Amount,
-		Currency:  p.Money.Currency,
-		Status:    string(p.Status),
-		CreatedAt: p.CreatedAt,
+	if uc.publisher != nil {
+		if err := uc.publisher.PublishCreated(ctx, p); err != nil {
+			return nil, err
+		}
 	}
+
+	return toPaymentResponse(p), nil
 }

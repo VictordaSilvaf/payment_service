@@ -9,6 +9,7 @@ import (
 	"payment_service/internal/infrastructure/config"
 	"payment_service/internal/infrastructure/http"
 	"payment_service/internal/infrastructure/http/handler"
+	"payment_service/internal/infrastructure/messaging/rabbitmq"
 	"payment_service/internal/infrastructure/persistence/postgres"
 )
 
@@ -27,9 +28,15 @@ func main() {
 	}
 	defer pool.Close()
 
+	publisher, err := rabbitmq.NewPaymentPublisher(cfg.RabbitMQ)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer publisher.Close()
+
 	repo := postgres.NewPaymentRepository(pool)
 
-	createPayment := usecase.NewCreatePayment(repo)
+	createPayment := usecase.NewCreatePayment(repo, publisher)
 	getPayment := usecase.NewGetPayment(repo)
 	listPayment := usecase.NewListPayment(repo)
 

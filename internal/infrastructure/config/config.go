@@ -3,12 +3,15 @@ package config
 import (
 	"fmt"
 	"os"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
 	Port     string
 	Postgres PostgresConfig
 	Redis    RedisConfig
+	RabbitMQ RabbitMQConfig
 }
 
 type PostgresConfig struct {
@@ -35,7 +38,27 @@ func (r RedisConfig) Addr() string {
 	return fmt.Sprintf("%s:%s", r.Host, r.Port)
 }
 
+type RabbitMQConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	VHost    string
+	Exchange string
+	Queue    string
+}
+
+func (r RabbitMQConfig) URL() string {
+	base := fmt.Sprintf("amqp://%s:%s@%s:%s", r.User, r.Password, r.Host, r.Port)
+	if r.VHost == "" || r.VHost == "/" {
+		return base + "/"
+	}
+	return base + "/" + r.VHost
+}
+
 func Load() Config {
+	_ = godotenv.Load()
+
 	return Config{
 		Port: envOrDefault("PORT", "8080"),
 		Postgres: PostgresConfig{
@@ -48,6 +71,15 @@ func Load() Config {
 		Redis: RedisConfig{
 			Host: envOrDefault("REDIS_HOST", "localhost"),
 			Port: envOrDefault("REDIS_PORT", "6379"),
+		},
+		RabbitMQ: RabbitMQConfig{
+			Host:     envOrDefault("RABBITMQ_HOST", "localhost"),
+			Port:     envOrDefault("RABBITMQ_PORT", "5672"),
+			User:     envOrDefault("RABBITMQ_USER", "payment"),
+			Password: envOrDefault("RABBITMQ_PASSWORD", "payment"),
+			VHost:    envOrDefault("RABBITMQ_VHOST", "/"),
+			Exchange: envOrDefault("RABBITMQ_EXCHANGE", "payment.events"),
+			Queue:    envOrDefault("RABBITMQ_QUEUE", "payment.created"),
 		},
 	}
 }

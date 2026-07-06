@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
+	"strconv"
 
 	"payment_service/internal/database/seeder"
 	"payment_service/internal/infrastructure/config"
@@ -11,11 +13,12 @@ import (
 )
 
 func main() {
-	count := flag.Int("count", 25, "number of payments to seed")
+	cfg := config.Load()
+
+	count := flag.Int("count", seedCountDefault(), "number of payments to seed")
 	fresh := flag.Bool("fresh", false, "truncate payments table before seeding")
 	flag.Parse()
 
-	cfg := config.Load()
 	ctx := context.Background()
 
 	pool, err := postgres.NewPool(ctx, cfg.Postgres)
@@ -34,4 +37,13 @@ func main() {
 	}
 
 	log.Printf("seeded %d payments successfully", *count)
+}
+
+func seedCountDefault() int {
+	if value := os.Getenv("SEED_COUNT"); value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 25
 }

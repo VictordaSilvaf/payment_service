@@ -10,10 +10,10 @@ migrate-version:
 	go run ./cmd/migrate version
 
 seed:
-	go run ./cmd/seed -count=25
+	go run ./cmd/seed
 
 seed-fresh:
-	go run ./cmd/seed -count=25 -fresh
+	go run ./cmd/seed -fresh
 
 run:
 	go run ./cmd/api

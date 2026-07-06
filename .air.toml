@@ -2,7 +2,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -buildvcs=false -o ./tmp/api ./cmd/api"
+  cmd = "go mod download && go build -buildvcs=false -o ./tmp/api ./cmd/api"
   entrypoint = "./tmp/api"
   include_ext = ["go"]
   exclude_dir = ["tmp", "vendor"]
