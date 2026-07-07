@@ -18,6 +18,11 @@ type Config struct {
 	IdempotencyLock time.Duration
 	Outbox          OutboxConfig
 	Webhook         WebhookConfig
+	PSP             PSPConfig
+}
+
+type PSPConfig struct {
+	MockLatency time.Duration // latência simulada da chamada ao PSP mock
 }
 
 type OutboxConfig struct {
@@ -89,6 +94,9 @@ func Load() Config {
 		Webhook: WebhookConfig{
 			Queue:       envOrDefault("WEBHOOK_QUEUE", "webhook.payment"),
 			HTTPTimeout: durationOrDefault("WEBHOOK_HTTP_TIMEOUT", 5*time.Second),
+		},
+		PSP: PSPConfig{
+			MockLatency: durationOrDefault("PSP_MOCK_LATENCY", 0),
 		},
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),

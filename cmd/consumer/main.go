@@ -12,6 +12,7 @@ import (
 	"payment_service/internal/infrastructure/config"
 	"payment_service/internal/infrastructure/messaging/rabbitmq"
 	"payment_service/internal/infrastructure/persistence/postgres"
+	"payment_service/internal/infrastructure/psp"
 )
 
 func main() {
@@ -26,7 +27,8 @@ func main() {
 	paymentRepository := postgres.NewPaymentRepository(db)
 	outboxRepository := postgres.NewOutboxRepository(db)
 	txManager := postgres.NewTxManager(db)
-	processPayment := usecase.NewProcessPayment(paymentRepository, outboxRepository, txManager)
+	gateway := psp.NewMockGateway(cfg.PSP.MockLatency)
+	processPayment := usecase.NewProcessPayment(paymentRepository, gateway, outboxRepository, txManager)
 
 	consumer, err := rabbitmq.NewPaymentConsumer(
 		cfg.RabbitMQ,

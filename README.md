@@ -32,8 +32,9 @@ Principais capacidades:
 - **Idempotência** no `POST /payments` via Redis (header `Idempotency-Key`)
 - **Eventos** publicados no RabbitMQ ao criar um pagamento (`payment.created`)
 - **Outbox Pattern**: o evento é gravado na mesma transação do pagamento e publicado depois por um relay (sem dual-write)
-- **Consumer** assíncrono que consome `payment.created` e conclui o pagamento (`pending` → `completed`), emitindo `payment.completed`
-- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído
+- **Consumer** assíncrono que consome `payment.created`, **autoriza no PSP** e transiciona o pagamento (`pending` → `completed`/`failed`), emitindo `payment.completed` ou `payment.failed`
+- **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa), com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
+- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído ou recusado
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -137,6 +138,7 @@ payment_service/
 │   ├── domain/outbox/                       # Evento e porta do Outbox
 │   │   ├── event.go                         # Modelo Event
 │   │   └── repository.go                    # Porta Repository
+│   ├── domain/psp/                          # Porta Gateway do PSP + tipos de resultado
 │   ├── domain/webhook/                      # Assinatura, entrega, assinatura HMAC e portas
 │   │   ├── subscription.go                  # Entidade Subscription
 │   │   ├── delivery.go                      # Entidade Delivery
@@ -161,6 +163,7 @@ payment_service/
 │       ├── http/                            # Router, handlers, middleware
 │       │   └── webhookclient/               # Sender HTTP (entrega de webhooks)
 │       ├── messaging/rabbitmq/              # Adapter RabbitMQ (publisher, consumer, subscriber)
+│       ├── psp/                             # Adapter PSP mock (autorização)
 │       └── persistence/
 │           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, webhooks, TxManager)
 │           └── memory/                      # Adapter in-memory (testes)
@@ -276,28 +279,38 @@ sequenceDiagram
     participant UC as ProcessPayment
     participant Domain as payment.Complete()
     participant Repo as PostgresRepository
+    participant PSP as PSP (mock)
     participant DB as PostgreSQL
 
     RMQ->>Consumer: entrega payment.created
     Consumer->>UC: Execute(ctx, event)
     UC->>Repo: FindByID(ctx, id)
     Repo->>DB: SELECT ... WHERE id
-    UC->>Domain: Complete()
-    Domain-->>UC: status = completed
-    Note over UC,DB: Mesma transação (Outbox)
-    UC->>Repo: Update(ctx, payment)
-    Repo->>DB: UPDATE payments SET status
-    UC->>DB: INSERT outbox_events (payment.completed)
-    alt Sucesso
-        Consumer->>RMQ: Ack (remove da fila)
-    else Falha
+    UC->>PSP: Authorize(ctx, payment)
+    alt Aprovado
+        PSP-->>UC: approved
+        UC->>Domain: Complete()  → status = completed
+        Note over UC,DB: Mesma transação (Outbox)
+        UC->>Repo: Update(ctx, payment)
+        UC->>DB: INSERT outbox_events (payment.completed)
+        Consumer->>RMQ: Ack
+    else Recusado
+        PSP-->>UC: declined
+        UC->>Domain: Fail()  → status = failed
+        Note over UC,DB: Mesma transação (Outbox)
+        UC->>Repo: Update(ctx, payment)
+        UC->>DB: INSERT outbox_events (payment.failed)
+        Consumer->>RMQ: Ack
+    else Erro do PSP (timeout/indisponível)
+        PSP-->>UC: error
+        Note over UC: pagamento continua pending
         Consumer->>RMQ: Nack (reenfileira)
     end
 ```
 
 > Se o consumer **não estiver rodando**, os eventos ficam acumulados na fila e os pagamentos permanecem em `pending` até um consumer conectar e processá-los.
 
-> Ao concluir, o consumer grava o evento `payment.completed` no outbox (mesma transação). O relay o publica e o **Webhook Service** o entrega aos lojistas.
+> A **recusa** do PSP é uma decisão de negócio (não é erro): o pagamento vira `failed` e o evento `payment.failed` é emitido. Já um **erro** do PSP (timeout/indisponível) é transitório: a mensagem é reenfileirada e o pagamento continua `pending` — é aqui que os próximos itens *Retry* e *DLQ* atuarão.
 
 ### Fluxo assíncrono — Entregar webhook (Webhook Service)
 
@@ -713,8 +726,9 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `RABBITMQ_QUEUE` | `payment` | Fila de pagamentos criados |
 | `OUTBOX_POLL_INTERVAL` | `1s` | Intervalo de varredura do relay do outbox |
 | `OUTBOX_BATCH_SIZE` | `100` | Máx. de eventos publicados por ciclo do relay |
-| `WEBHOOK_QUEUE` | `webhook.payment` | Fila do webhook service (ligada a `payment.completed`) |
+| `WEBHOOK_QUEUE` | `webhook.payment` | Fila do webhook service (ligada a `payment.completed` e `payment.failed`) |
 | `WEBHOOK_HTTP_TIMEOUT` | `5s` | Timeout do POST ao endpoint do lojista |
+| `PSP_MOCK_LATENCY` | `0` | Latência simulada da autorização no PSP mock (ex.: `200ms`) |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
 > Dentro do Docker Compose, use os nomes dos serviços: `POSTGRES_HOST=postgres`, `REDIS_HOST=redis`, `RABBITMQ_HOST=rabbitmq`.
@@ -789,8 +803,8 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 |---|---|---|---|
 | `api` | `payment_api` | 8080 | API Go |
 | `outbox` | `payment_outbox` | — | Relay: publica eventos pendentes da tabela `outbox_events` |
-| `consumer` | `payment_consumer` | — | Consome `payment.created` e conclui pagamentos |
-| `webhook` | `payment_webhook` | — | Consome `payment.completed` e entrega webhooks assinados |
+| `consumer` | `payment_consumer` | — | Consome `payment.created`, autoriza no PSP e conclui/recusa pagamentos |
+| `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed` e entrega webhooks assinados |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
@@ -805,6 +819,7 @@ Painel RabbitMQ: [http://localhost:15672](http://localhost:15672) (credenciais c
 |---|---|---|---|
 | Pagamento criado | `payment.events` | `payment.created` | `{ id, amount, currency, status, created_at }` |
 | Pagamento concluído | `payment.events` | `payment.completed` | `{ id, amount, currency, status, created_at }` |
+| Pagamento recusado | `payment.events` | `payment.failed` | `{ id, amount, currency, status, created_at }` |
 
 ### Comandos úteis
 
@@ -842,7 +857,8 @@ docker compose down -v
 - [x] Consumer RabbitMQ (processar eventos assíncronos)
 - [x] Outbox Pattern (publicação transacional de eventos)
 - [x] Webhook Service (notificações assinadas a lojistas)
-- [ ] Retry de entregas de webhook que falharam
+- [x] PSP Mock (autorização aprovada/recusada, base para falhas reais)
+- [ ] Retry de entregas de webhook e de autorizações que falharam
 - [ ] Use cases: falhar pagamento
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
@@ -874,7 +890,7 @@ docker compose down -v
 
 ↓
 
-⬜ PSP Mock
+✅ PSP Mock
 
 ↓
 

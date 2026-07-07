@@ -8,9 +8,20 @@ import (
 	"payment_service/internal/application/dto"
 	"payment_service/internal/domain/outbox"
 	"payment_service/internal/domain/payment"
+	"payment_service/internal/domain/psp"
 	"payment_service/internal/infrastructure/persistence/memory"
 	"payment_service/internal/testutil"
 )
+
+// stubGateway simula o PSP nos testes, devolvendo um resultado/erro fixo.
+type stubGateway struct {
+	result psp.AuthorizationResult
+	err    error
+}
+
+func (g stubGateway) Authorize(_ context.Context, _ *payment.Payment) (psp.AuthorizationResult, error) {
+	return g.result, g.err
+}
 
 // passthroughTx executa a função direto, sem transação real (para testes).
 type passthroughTx struct{}
@@ -187,7 +198,8 @@ func TestProcessPaymentExecute(t *testing.T) {
 		}
 
 		outboxRepo := memory.NewOutboxRepository()
-		uc := NewProcessPayment(repo, outboxRepo, passthroughTx{})
+		gateway := stubGateway{result: psp.AuthorizationResult{Outcome: psp.OutcomeApproved}}
+		uc := NewProcessPayment(repo, gateway, outboxRepo, passthroughTx{})
 		out, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID, Amount: 1000, Currency: "BRL"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -213,9 +225,66 @@ func TestProcessPaymentExecute(t *testing.T) {
 		}
 	})
 
+	t.Run("psp declines and emits payment.failed", func(t *testing.T) {
+		repo := memory.NewPaymentRepository()
+		p, err := payment.New(1001, "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+
+		outboxRepo := memory.NewOutboxRepository()
+		gateway := stubGateway{result: psp.AuthorizationResult{Outcome: psp.OutcomeDeclined, Reason: "insufficient funds"}}
+		uc := NewProcessPayment(repo, gateway, outboxRepo, passthroughTx{})
+
+		out, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out.Status != string(payment.StatusFailed) {
+			t.Fatalf("expected failed, got %s", out.Status)
+		}
+
+		stored, _ := repo.FindByID(ctx, p.ID)
+		if stored.Status != payment.StatusFailed {
+			t.Fatalf("expected stored payment failed, got %s", stored.Status)
+		}
+
+		events, _ := outboxRepo.FetchUnpublished(ctx, 10)
+		if len(events) != 1 || events[0].Type != eventPaymentFailed {
+			t.Fatalf("expected 1 payment.failed event, got %+v", events)
+		}
+	})
+
+	t.Run("psp error keeps payment pending", func(t *testing.T) {
+		repo := memory.NewPaymentRepository()
+		p, err := payment.New(1000, "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+
+		pspErr := errors.New("psp unavailable")
+		uc := NewProcessPayment(repo, stubGateway{err: pspErr}, memory.NewOutboxRepository(), passthroughTx{})
+
+		_, err = uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID})
+		if !errors.Is(err, pspErr) {
+			t.Fatalf("expected psp error, got %v", err)
+		}
+
+		stored, _ := repo.FindByID(ctx, p.ID)
+		if stored.Status != payment.StatusPending {
+			t.Fatalf("expected payment to remain pending, got %s", stored.Status)
+		}
+	})
+
 	t.Run("payment not found", func(t *testing.T) {
 		repo := memory.NewPaymentRepository()
-		uc := NewProcessPayment(repo, nil, nil)
+		uc := NewProcessPayment(repo, nil, nil, nil)
 
 		_, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: "missing-id"})
 		if !errors.Is(err, payment.ErrNotFound) {
@@ -236,7 +305,7 @@ func TestProcessPaymentExecute(t *testing.T) {
 		updateErr := errors.New("update failed")
 		repo := &updateErrorRepo{PaymentRepository: base, updateErr: updateErr}
 
-		uc := NewProcessPayment(repo, nil, nil)
+		uc := NewProcessPayment(repo, nil, nil, nil)
 		_, err = uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID})
 		if !errors.Is(err, updateErr) {
 			t.Fatalf("expected update error, got %v", err)
