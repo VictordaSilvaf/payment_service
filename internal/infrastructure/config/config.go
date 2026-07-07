@@ -17,11 +17,17 @@ type Config struct {
 	IdempotencyTTL  time.Duration
 	IdempotencyLock time.Duration
 	Outbox          OutboxConfig
+	Webhook         WebhookConfig
 }
 
 type OutboxConfig struct {
 	PollInterval time.Duration
 	BatchSize    int
+}
+
+type WebhookConfig struct {
+	Queue       string        // fila do webhook service
+	HTTPTimeout time.Duration // timeout do POST ao endpoint do lojista
 }
 
 type PostgresConfig struct {
@@ -79,6 +85,10 @@ func Load() Config {
 		Outbox: OutboxConfig{
 			PollInterval: durationOrDefault("OUTBOX_POLL_INTERVAL", time.Second),
 			BatchSize:    intOrDefault("OUTBOX_BATCH_SIZE", 100),
+		},
+		Webhook: WebhookConfig{
+			Queue:       envOrDefault("WEBHOOK_QUEUE", "webhook.payment"),
+			HTTPTimeout: durationOrDefault("WEBHOOK_HTTP_TIMEOUT", 5*time.Second),
 		},
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),

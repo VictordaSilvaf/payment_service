@@ -24,7 +24,9 @@ func main() {
 	defer db.Close()
 
 	paymentRepository := postgres.NewPaymentRepository(db)
-	processPayment := usecase.NewProcessPayment(paymentRepository)
+	outboxRepository := postgres.NewOutboxRepository(db)
+	txManager := postgres.NewTxManager(db)
+	processPayment := usecase.NewProcessPayment(paymentRepository, outboxRepository, txManager)
 
 	consumer, err := rabbitmq.NewPaymentConsumer(
 		cfg.RabbitMQ,

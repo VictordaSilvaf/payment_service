@@ -10,6 +10,7 @@ import (
 type RouterConfig struct {
 	HealthHandler  *handler.HealthHandler
 	PaymentHandler *handler.PaymentHandler
+	WebhookHandler *handler.WebhookHandler
 }
 
 func NewRouter(cfg RouterConfig) *gin.Engine {
@@ -22,6 +23,12 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		v1.POST("/payments", middleware.Idempotency(), cfg.PaymentHandler.Create)
 		v1.GET("/payments/:id", cfg.PaymentHandler.GetByID)
 		v1.GET("/payments", cfg.PaymentHandler.List)
+
+		// Registrado apenas quando o handler está configurado (nil em alguns testes).
+		if cfg.WebhookHandler != nil {
+			v1.POST("/webhooks", cfg.WebhookHandler.Create)
+			v1.GET("/webhooks", cfg.WebhookHandler.List)
+		}
 	}
 
 	return router

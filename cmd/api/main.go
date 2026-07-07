@@ -6,6 +6,7 @@ import (
 
 	"payment_service/internal/application/idempotency"
 	"payment_service/internal/application/usecase"
+	appwebhook "payment_service/internal/application/webhook"
 	"payment_service/internal/database/migrate"
 	"payment_service/internal/infrastructure/cache/redis"
 	"payment_service/internal/infrastructure/config"
@@ -51,6 +52,10 @@ func main() {
 	getPayment := usecase.NewGetPayment(repo)
 	listPayment := usecase.NewListPayment(repo)
 
+	webhookSubscriptions := postgres.NewWebhookSubscriptionRepository(pool)
+	createSubscription := appwebhook.NewCreateSubscription(webhookSubscriptions)
+	listSubscriptions := appwebhook.NewListSubscriptions(webhookSubscriptions)
+
 	router := http.NewRouter(http.RouterConfig{
 		HealthHandler: handler.NewHealthHandler(),
 		PaymentHandler: handler.NewPaymentHandler(
@@ -58,6 +63,10 @@ func main() {
 			getPayment,
 			listPayment,
 			idempotencyService,
+		),
+		WebhookHandler: handler.NewWebhookHandler(
+			createSubscription,
+			listSubscriptions,
 		),
 	})
 

@@ -186,7 +186,8 @@ func TestProcessPaymentExecute(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		uc := NewProcessPayment(repo)
+		outboxRepo := memory.NewOutboxRepository()
+		uc := NewProcessPayment(repo, outboxRepo, passthroughTx{})
 		out, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID, Amount: 1000, Currency: "BRL"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -202,11 +203,19 @@ func TestProcessPaymentExecute(t *testing.T) {
 		if stored.Status != payment.StatusCompleted {
 			t.Fatalf("expected stored payment completed, got %s", stored.Status)
 		}
+
+		events, err := outboxRepo.FetchUnpublished(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Type != eventPaymentCompleted {
+			t.Fatalf("expected 1 payment.completed event, got %+v", events)
+		}
 	})
 
 	t.Run("payment not found", func(t *testing.T) {
 		repo := memory.NewPaymentRepository()
-		uc := NewProcessPayment(repo)
+		uc := NewProcessPayment(repo, nil, nil)
 
 		_, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: "missing-id"})
 		if !errors.Is(err, payment.ErrNotFound) {
@@ -227,7 +236,7 @@ func TestProcessPaymentExecute(t *testing.T) {
 		updateErr := errors.New("update failed")
 		repo := &updateErrorRepo{PaymentRepository: base, updateErr: updateErr}
 
-		uc := NewProcessPayment(repo)
+		uc := NewProcessPayment(repo, nil, nil)
 		_, err = uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID})
 		if !errors.Is(err, updateErr) {
 			t.Fatalf("expected update error, got %v", err)

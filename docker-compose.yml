@@ -85,6 +85,33 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: payment_webhook
+    restart: unless-stopped
+    command: ["./webhook"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-payment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payment}
+      POSTGRES_DB: ${POSTGRES_DB:-payment_db}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-payment}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-payment}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-payment.events}
+      WEBHOOK_QUEUE: ${WEBHOOK_QUEUE:-webhook.payment}
+      WEBHOOK_HTTP_TIMEOUT: ${WEBHOOK_HTTP_TIMEOUT:-5s}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
     container_name: payment_postgres
