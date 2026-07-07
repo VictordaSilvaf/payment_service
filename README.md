@@ -612,3 +612,71 @@ docker compose down -v
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
 - [ ] CI/CD pipeline
+
+## Roadmap
+
+✅ Payment API
+
+↓
+
+✅ Redis Idempotência
+
+↓
+
+✅ Rabbit Publisher
+
+↓
+
+⬜ Rabbit Consumer
+
+↓
+
+⬜ Outbox Pattern
+
+↓
+
+⬜ Webhook Service
+
+↓
+
+⬜ PSP Mock
+
+↓
+
+⬜ Retry
+
+↓
+
+⬜ Dead Letter Queue
+
+↓
+
+⬜ Notification Service
+
+↓
+
+⬜ Wallet Service
+
+↓
+
+⬜ Audit Service
+
+↓
+
+⬜ Saga
+
+↓
+
+⬜ OpenTelemetry
+
+↓
+
+⬜ Grafana
+
+↓
+
+⬜ Prometheus
+
+↓
+
+⬜ Kubernetes
