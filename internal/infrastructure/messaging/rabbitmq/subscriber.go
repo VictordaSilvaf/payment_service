@@ -11,10 +11,18 @@ import (
 	"payment_service/internal/infrastructure/config"
 )
 
-// MessageHandler processa uma mensagem recebida. Recebe a routing key (tipo do
-// evento) e o corpo cru. Retornar erro faz o Subscriber devolver a mensagem à
-// fila (nack requeue) para nova tentativa; retornar nil confirma (ack).
-type MessageHandler func(ctx context.Context, routingKey string, body []byte) error
+// Message é a mensagem entregue ao handler: id (MessageId da AMQP, usado para
+// deduplicação), a routing key (tipo do evento) e o corpo cru.
+type Message struct {
+	ID         string
+	RoutingKey string
+	Body       []byte
+}
+
+// MessageHandler processa uma mensagem recebida. Retornar erro faz o Subscriber
+// devolver a mensagem à fila (nack requeue) para nova tentativa; retornar nil
+// confirma (ack).
+type MessageHandler func(ctx context.Context, msg Message) error
 
 // Subscriber é um consumer genérico: declara a exchange, uma fila própria e a
 // liga a uma ou mais routing keys, entregando cada mensagem ao handler. É usado
@@ -117,7 +125,11 @@ func (s *Subscriber) Start(ctx context.Context) error {
 func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery) {
 	// Tenta o handler algumas vezes (erros de infraestrutura costumam ser transitórios).
 	err := processWithRetry(ctx, s.maxRetries, s.retryDelay, func() error {
-		return s.handler(ctx, msg.RoutingKey, msg.Body)
+		return s.handler(ctx, Message{
+			ID:         msg.MessageId,
+			RoutingKey: msg.RoutingKey,
+			Body:       msg.Body,
+		})
 	})
 	if err != nil {
 		// Esgotou as tentativas: Nack com requeue=false encaminha para a DLQ,

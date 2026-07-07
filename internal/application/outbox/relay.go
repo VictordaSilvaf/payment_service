@@ -11,8 +11,10 @@ import (
 
 // Publisher é a porta de saída que o relay usa para publicar o evento no broker.
 // A implementação (RabbitMQ) publica o payload cru na exchange usando a routing key.
+// O messageID (id do evento no outbox) trafega como identificador da mensagem para
+// que consumidores possam deduplicar reentregas (ex.: a trilha de auditoria).
 type Publisher interface {
-	Publish(ctx context.Context, routingKey string, body []byte) error
+	Publish(ctx context.Context, routingKey, messageID string, body []byte) error
 }
 
 // Relay é o dispatcher do Outbox Pattern: periodicamente lê eventos pendentes,
@@ -61,7 +63,7 @@ func (r *Relay) dispatch(ctx context.Context) error {
 	}
 
 	for _, event := range events {
-		if err := r.publisher.Publish(ctx, event.Type, event.Payload); err != nil {
+		if err := r.publisher.Publish(ctx, event.Type, event.ID, event.Payload); err != nil {
 			return fmt.Errorf("publish event %s: %w", event.ID, err)
 		}
 		if err := r.repo.MarkPublished(ctx, event.ID); err != nil {

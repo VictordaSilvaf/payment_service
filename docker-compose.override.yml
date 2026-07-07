@@ -46,5 +46,14 @@ services:
       - go_mod_cache:/go/pkg/mod
     restart: "no"
 
+  audit:
+    build:
+      dockerfile: Dockerfile.dev
+    command: ["sh", "-c", "go mod download && air -c .air.audit.toml"]
+    volumes:
+      - .:/app
+      - go_mod_cache:/go/pkg/mod
+    restart: "no"
+
 volumes:
   go_mod_cache:

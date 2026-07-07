@@ -39,6 +39,7 @@ Principais capacidades:
 - **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa) e sempre aceita captura/estorno, com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
 - **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído, recusado ou estornado, com **retry** (backoff exponencial + limite de tentativas) para entregas que falharam
 - **Notification Service**: notifica o **usuário final** (e-mail/SMS/push — mock via log) quando o pagamento é concluído, recusado ou estornado, com dedup por id determinístico e reentrega via DLQ
+- **Audit Service**: registra uma **trilha de auditoria imutável** (append-only) de **todos** os eventos de pagamento (`payment.*`), deduplicando reentregas pelo id do evento propagado no `MessageId` da mensagem
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -128,6 +129,7 @@ payment_service/
 │   ├── outbox/main.go                       # Composition root do relay do outbox
 │   ├── webhook/main.go                      # Composition root do webhook service
 │   ├── notification/main.go                 # Composition root do notification service
+│   ├── audit/main.go                         # Composition root do audit service
 │   ├── migrate/main.go                      # CLI de migrations
 │   └── seed/main.go                         # CLI de seeders
 ├── db/migrations/                           # SQL versionado (golang-migrate)
@@ -152,12 +154,14 @@ payment_service/
 │   │   ├── sender.go                        # Porta Sender
 │   │   └── repository.go                    # Portas Subscription/Delivery
 │   ├── domain/notification/                 # Notificação ao usuário + portas Notifier/Repository
+│   ├── domain/audit/                         # Registro da trilha (AuditEntry) + porta Repository
 │   ├── application/
 │   │   ├── dto/                             # Objetos de transferência
 │   │   ├── idempotency/                     # Serviço e contratos de idempotência
 │   │   ├── outbox/                          # Relay (dispatcher) + porta Publisher
 │   │   ├── webhook/                         # DispatchWebhook + RetryDeliveries + gestão de assinaturas
 │   │   ├── notification/                    # NotifyPayment (monta e envia a notificação)
+│   │   ├── audit/                           # RecordAudit (grava o evento na trilha)
 │   │   ├── payment/                         # Mapper e validator
 │   │   └── usecase/                         # Casos de uso (criar, buscar, listar, processar, capturar, estornar)
 │   ├── database/
@@ -174,16 +178,18 @@ payment_service/
 │       ├── psp/                             # Adapter PSP mock (autorização)
 │       ├── notification/                    # Adapter Notifier mock (log)
 │       └── persistence/
-│           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, webhooks, notifications, TxManager)
+│           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, webhooks, notifications, audit, TxManager)
 │           └── memory/                      # Adapter in-memory (testes)
 ├── docker-compose.yml                       # Orquestração (produção)
 ├── docker-compose.override.yml              # Hot-reload (dev, auto-carregado)
-├── Dockerfile                               # Build de produção (API + consumer + outbox + webhook + notification)
+├── Dockerfile                               # Build de produção (API + consumer + outbox + webhook + notification + audit)
 ├── Dockerfile.dev                           # Build de desenvolvimento (Air)
 ├── .air.toml                                # Hot-reload da API
 ├── .air.consumer.toml                       # Hot-reload do consumer
 ├── .air.outbox.toml                         # Hot-reload do relay do outbox
 ├── .air.webhook.toml                        # Hot-reload do webhook service
+├── .air.notification.toml                   # Hot-reload do notification service
+├── .air.audit.toml                          # Hot-reload do audit service
 └── Makefile                                 # Atalhos (migrate, seed, test, run)
 ```
 
@@ -483,6 +489,32 @@ Pontos importantes:
 - **Confiabilidade**: falha de envio é gravada como `failed` e o erro é propagado ao `Subscriber`, que retenta (`RABBITMQ_MAX_RETRIES`) e, se persistir, manda à DLQ `notification.payment.dlq`.
 - **Destinatário**: como o pagamento não guarda dados do cliente, o mock deriva um e-mail de exemplo (`customer+<id>@example.com`). Num sistema real viria do cadastro do cliente.
 
+### Fluxo assíncrono — Trilha de auditoria (Audit Service)
+
+O Audit Service assina **todos** os eventos de pagamento (`payment.*`) e grava cada um em uma tabela **append-only** (`audit_logs`). É a "caixa-preta" do sistema: um histórico imutável de tudo o que aconteceu com cada pagamento, útil para conciliação, compliance e investigação de incidentes.
+
+```mermaid
+sequenceDiagram
+    participant Relay as Outbox Relay
+    participant RMQ as RabbitMQ (fila audit.payment)
+    participant Sub as Subscriber
+    participant UC as RecordAudit
+    participant Repo as AuditRepository
+
+    Relay->>RMQ: publica evento (MessageId = id do outbox)
+    RMQ->>Sub: entrega payment.* (created/authorized/completed/failed/refunded)
+    Sub->>UC: Execute(ctx, msg.ID, routingKey, payload)
+    UC->>Repo: Append (INSERT ... ON CONFLICT (id) DO NOTHING)
+    Sub->>RMQ: Ack
+```
+
+Pontos importantes:
+
+- **Imutável (append-only)**: a porta `Repository` só expõe `Append` — não há update nem delete. A tabela não tem `updated_at`.
+- **Dedup por id do evento**: o relay propaga o id do evento do outbox no `MessageId` da mensagem AMQP; o `Append` usa `ON CONFLICT (id) DO NOTHING`, então reentregas (retry/DLQ) não duplicam a trilha. Sem `MessageId`, cai para um hash estável do conteúdo.
+- **Cobertura total**: o binding `payment.*` (topic exchange) captura todos os eventos atuais e futuros de pagamento sem precisar alterar o serviço.
+- **Snapshot**: guarda o payload cru (`JSONB`) como ele trafegou no broker, preservando o estado exato no momento do evento.
+
 ### Infraestrutura Docker
 
 ```mermaid
@@ -496,6 +528,8 @@ flowchart LR
         Outbox["payment_outbox\n(Go + Air)"]
         Consumer["payment_consumer\n(Go + Air)"]
         Webhook["payment_webhook\n(Go + Air)"]
+        Notification["payment_notification\n(Go + Air)"]
+        Audit["payment_audit\n(Go + Air)"]
         PG["payment_postgres\n(PostgreSQL 16)"]
         RD["payment_redis\n(Redis 7)"]
         RMQ["payment_rabbitmq\n(RabbitMQ 3.13)"]
@@ -513,6 +547,10 @@ flowchart LR
     RMQ -->|payment.completed| Webhook
     Webhook -->|:5432| PG
     Webhook -->|POST assinado| Merchant
+    RMQ -->|payment.completed/failed/refunded| Notification
+    Notification -->|:5432| PG
+    RMQ -->|payment.*| Audit
+    Audit -->|:5432| PG
 
     PG --- VolPG[("postgres_data\n(volume)")]
     RD --- VolRD[("redis_data\n(volume)")]
@@ -790,6 +828,9 @@ go run ./cmd/webhook
 
 # Em outro terminal, rodar o notification service (notifica o usuário final)
 go run ./cmd/notification
+
+# Em outro terminal, rodar o audit service (trilha imutável de payment.*)
+go run ./cmd/audit
 ```
 
 ---
@@ -912,6 +953,7 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `PSP_MOCK_LATENCY` | `0` | Latência simulada da autorização no PSP mock (ex.: `200ms`) |
 | `NOTIFICATION_QUEUE` | `notification.payment` | Fila do notification service (ligada a `payment.completed` e `payment.failed`) |
 | `NOTIFICATION_CHANNEL` | `email` | Canal padrão da notificação (`email`/`sms`/`push` — mock) |
+| `AUDIT_QUEUE` | `audit.payment` | Fila do audit service (ligada a `payment.*`) |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
 > Dentro do Docker Compose, use os nomes dos serviços: `POSTGRES_HOST=postgres`, `REDIS_HOST=redis`, `RABBITMQ_HOST=rabbitmq`.
@@ -988,6 +1030,16 @@ CREATE TABLE notifications (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Trilha de auditoria imutável (append-only): um registro por evento de pagamento
+CREATE TABLE audit_logs (
+    id             TEXT PRIMARY KEY,       -- id do evento (MessageId/outbox) → dedup
+    aggregate_type VARCHAR(20) NOT NULL,   -- ex.: "payment"
+    aggregate_id   TEXT NOT NULL,          -- id do agregado (ex.: id do pagamento)
+    event_type     VARCHAR(50) NOT NULL,   -- ex.: "payment.completed"
+    payload        JSONB NOT NULL,         -- snapshot do evento
+    recorded_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
 
 Os dados ficam no volume Docker `postgres_data` e **persistem** entre restarts da API.
@@ -1013,6 +1065,7 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 | `consumer` | `payment_consumer` | — | Consome `payment.created`, autoriza no PSP e conclui/recusa pagamentos |
 | `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed`/`payment.refunded`, entrega webhooks assinados e reenvia falhas (retry com backoff) |
 | `notification` | `payment_notification` | — | Consome `payment.completed`/`payment.failed`/`payment.refunded` e notifica o usuário final (mock via log) |
+| `audit` | `payment_audit` | — | Consome `payment.*` e grava a trilha de auditoria imutável (`audit_logs`) |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
@@ -1124,7 +1177,7 @@ docker compose down -v
 
 ↓
 
-⬜ **Audit Service** — registra trilha de auditoria imutável de todas as ações e mudanças de estado.
+✅ **Audit Service** — registra trilha de auditoria imutável (append-only) de todos os eventos de pagamento (`payment.*`), com dedup pelo id do evento propagado no `MessageId`.
 
 ↓
 

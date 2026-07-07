@@ -23,7 +23,7 @@ type published struct {
 	body       []byte
 }
 
-func (m *mockPublisher) Publish(_ context.Context, routingKey string, body []byte) error {
+func (m *mockPublisher) Publish(_ context.Context, routingKey, _ string, body []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {

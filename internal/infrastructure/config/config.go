@@ -20,11 +20,16 @@ type Config struct {
 	Webhook         WebhookConfig
 	PSP             PSPConfig
 	Notification    NotificationConfig
+	Audit           AuditConfig
 }
 
 type NotificationConfig struct {
 	Queue   string // fila do notification service
 	Channel string // canal padrão de envio (email/sms/push)
+}
+
+type AuditConfig struct {
+	Queue string // fila do audit service
 }
 
 type PSPConfig struct {
@@ -123,6 +128,9 @@ func Load() Config {
 		Notification: NotificationConfig{
 			Queue:   envOrDefault("NOTIFICATION_QUEUE", "notification.payment"),
 			Channel: envOrDefault("NOTIFICATION_CHANNEL", "email"),
+		},
+		Audit: AuditConfig{
+			Queue: envOrDefault("AUDIT_QUEUE", "audit.payment"),
 		},
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),

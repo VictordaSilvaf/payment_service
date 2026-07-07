@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"payment_service/internal/domain/payment"
@@ -126,18 +127,21 @@ func (p *PaymentPublisher) PublishCreated(ctx context.Context, pay *payment.Paym
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
-	return p.Publish(ctx, routingKey, body)
+	return p.Publish(ctx, routingKey, uuid.NewString(), body)
 }
 
 // Publish envia um corpo já serializado para a exchange usando a routing key
 // informada. É o método usado pelo Outbox Relay, que lê o payload cru da tabela
-// outbox_events e o publica sem reconstruir a entidade de domínio.
-func (p *PaymentPublisher) Publish(ctx context.Context, routingKey string, body []byte) error {
+// outbox_events e o publica sem reconstruir a entidade de domínio. O messageID
+// (id do evento) viaja no campo MessageId da mensagem, permitindo que consumidores
+// deduplicem reentregas.
+func (p *PaymentPublisher) Publish(ctx context.Context, routingKey, messageID string, body []byte) error {
 	// Publica na exchange com a routing key. Parâmetros: mandatory=false, immediate=false.
 	// DeliveryMode=Persistent grava a mensagem em disco, sobrevivendo a restart do broker.
 	err := p.channel.PublishWithContext(ctx, p.exchange, routingKey, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
+		MessageId:    messageID,
 		Timestamp:    time.Now().UTC(),
 		Body:         body,
 	})

@@ -41,8 +41,8 @@ func main() {
 		cfg.RabbitMQ,
 		cfg.Notification.Queue,
 		[]string{"payment.completed", "payment.failed", "payment.refunded"},
-		func(ctx context.Context, routingKey string, body []byte) error {
-			return notify.Execute(ctx, routingKey, body)
+		func(ctx context.Context, msg rabbitmq.Message) error {
+			return notify.Execute(ctx, msg.RoutingKey, msg.Body)
 		},
 	)
 	if err != nil {

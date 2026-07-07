@@ -1,9 +1,9 @@
 root = "."
-tmp_dir = "tmp_webhook"
+tmp_dir = "tmp_audit"
 
 [build]
-  cmd = "go mod download && go build -buildvcs=false -o ./tmp_webhook/webhook ./cmd/webhook"
-  entrypoint = "./tmp_webhook/webhook"
+  cmd = "go mod download && go build -buildvcs=false -o ./tmp_audit/audit ./cmd/audit"
+  entrypoint = "./tmp_audit/audit"
   include_ext = ["go"]
   exclude_dir = ["tmp", "tmp_consumer", "tmp_outbox", "tmp_webhook", "tmp_notification", "tmp_audit", "vendor"]
   delay = 500
