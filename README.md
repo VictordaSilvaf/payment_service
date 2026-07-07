@@ -34,7 +34,7 @@ Principais capacidades:
 - **Outbox Pattern**: o evento é gravado na mesma transação do pagamento e publicado depois por um relay (sem dual-write)
 - **Consumer** assíncrono que consome `payment.created`, **autoriza no PSP** e transiciona o pagamento (`pending` → `completed`/`failed`), emitindo `payment.completed` ou `payment.failed`
 - **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa), com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
-- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído ou recusado
+- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído ou recusado, com **retry** (backoff exponencial + limite de tentativas) para entregas que falharam
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -149,7 +149,7 @@ payment_service/
 │   │   ├── dto/                             # Objetos de transferência
 │   │   ├── idempotency/                     # Serviço e contratos de idempotência
 │   │   ├── outbox/                          # Relay (dispatcher) + porta Publisher
-│   │   ├── webhook/                         # DispatchWebhook + gestão de assinaturas
+│   │   ├── webhook/                         # DispatchWebhook + RetryDeliveries + gestão de assinaturas
 │   │   ├── payment/                         # Mapper e validator
 │   │   └── usecase/                         # Casos de uso
 │   ├── database/
@@ -334,7 +334,7 @@ sequenceDiagram
         alt 2xx
             UC->>DelRepo: Save(delivery = delivered)
         else erro / não-2xx
-            UC->>DelRepo: Save(delivery = failed)
+            UC->>DelRepo: Save(delivery = failed, next_attempt_at = agora + backoff)
         end
     end
     alt Erro de infraestrutura (buscar assinatura / salvar entrega)
@@ -344,7 +344,42 @@ sequenceDiagram
     end
 ```
 
-> Falha HTTP de um endpoint é registrada como entrega `failed` e **não** derruba o lote (a reentrega de falhas é o próximo item do roadmap — *Retry*). Só erros de infraestrutura devolvem a mensagem à fila. O id determinístico enviado em `X-Webhook-Id` permite ao lojista deduplicar reentregas.
+> Falha HTTP de um endpoint é registrada como entrega `failed` **com o próximo horário de tentativa agendado** e **não** derruba o lote. Só erros de infraestrutura devolvem a mensagem à fila. O id determinístico enviado em `X-Webhook-Id` permite ao lojista deduplicar reentregas.
+
+### Fluxo assíncrono — Retry de entregas (Webhook Service)
+
+Um poller roda **dentro do próprio webhook service**, em paralelo ao subscriber (padrão semelhante ao relay do outbox): a cada `WEBHOOK_RETRY_POLL_INTERVAL` ele varre as entregas `failed` cujo `next_attempt_at` já venceu e as reenvia, com **backoff exponencial** e limite de tentativas.
+
+```mermaid
+sequenceDiagram
+    participant Retry as RetryDeliveries (poller)
+    participant DelRepo as DeliveryRepository
+    participant Sender as HTTP Sender
+    participant Merchant as Endpoint do lojista
+
+    loop a cada WEBHOOK_RETRY_POLL_INTERVAL
+        Retry->>DelRepo: FetchRetriable(limit, now)  // status=failed AND next_attempt_at<=now (join assinatura ativa)
+        loop cada entrega elegível
+            Retry->>Sender: POST payload + assinatura (recalculada com o segredo atual)
+            Sender->>Merchant: HTTP POST
+            Merchant-->>Sender: 2xx / erro
+            alt 2xx
+                Retry->>DelRepo: Save(delivered)
+            else falha e ainda dentro do limite
+                Retry->>DelRepo: Save(failed, next_attempt_at = agora + base·2^(n-1))
+            else falha e atingiu MAX_ATTEMPTS
+                Retry->>DelRepo: Save(exhausted)  // terminal, não retenta mais
+            end
+        end
+    end
+```
+
+Pontos importantes do desenho:
+
+- **Auto-contido**: a entrega guarda `event_type` e `payload`, então o retry independe da mensagem original do RabbitMQ. URL e segredo vêm de um *join* com a assinatura (usa a config **atual** do lojista).
+- **Idempotente**: o `X-Webhook-Id` continua determinístico entre tentativas — o lojista deduplica reenvios.
+- **Backoff exponencial**: `base`, `base·2`, `base·4`, ... controlado por `WEBHOOK_RETRY_BASE_DELAY`, evitando martelar um endpoint fora do ar.
+- **Estado terminal `exhausted`**: ao estourar `WEBHOOK_RETRY_MAX_ATTEMPTS`, a entrega sai da fila de retry (é o "beco sem saída" que um DLQ trataria — próximo item do roadmap).
 
 ### Infraestrutura Docker
 
@@ -728,6 +763,10 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `OUTBOX_BATCH_SIZE` | `100` | Máx. de eventos publicados por ciclo do relay |
 | `WEBHOOK_QUEUE` | `webhook.payment` | Fila do webhook service (ligada a `payment.completed` e `payment.failed`) |
 | `WEBHOOK_HTTP_TIMEOUT` | `5s` | Timeout do POST ao endpoint do lojista |
+| `WEBHOOK_RETRY_MAX_ATTEMPTS` | `5` | Tentativas antes de marcar a entrega como `exhausted` |
+| `WEBHOOK_RETRY_BASE_DELAY` | `30s` | Atraso base do backoff exponencial (30s, 1m, 2m, ...) |
+| `WEBHOOK_RETRY_POLL_INTERVAL` | `10s` | Intervalo de varredura das entregas falhas pelo poller de retry |
+| `WEBHOOK_RETRY_BATCH_SIZE` | `100` | Máx. de entregas reprocessadas por ciclo do poller |
 | `PSP_MOCK_LATENCY` | `0` | Latência simulada da autorização no PSP mock (ex.: `200ms`) |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
@@ -770,17 +809,24 @@ CREATE TABLE webhook_subscriptions (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Webhooks: log de entregas (auditoria + base para reentrega)
+-- Webhooks: log de entregas (auditoria + base para reentrega/retry)
 CREATE TABLE webhook_deliveries (
     id               UUID PRIMARY KEY,
     subscription_id  UUID NOT NULL REFERENCES webhook_subscriptions (id) ON DELETE CASCADE,
     event_id         TEXT NOT NULL,          -- id estável do evento (dedup no lojista)
-    status           VARCHAR(20) NOT NULL,   -- pending | delivered | failed
+    event_type       VARCHAR(50) NOT NULL,   -- tipo do evento (para reenviar no retry)
+    payload          TEXT NOT NULL,          -- corpo enviado (para reenviar no retry)
+    status           VARCHAR(20) NOT NULL,   -- pending | delivered | failed | exhausted
     attempts         INT NOT NULL DEFAULT 0,
     last_error       TEXT,
+    next_attempt_at  TIMESTAMPTZ,            -- quando fica elegível ao próximo retry
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Índice do poller de retry: entregas falhas já no prazo de nova tentativa
+CREATE INDEX idx_webhook_deliveries_retry
+    ON webhook_deliveries (next_attempt_at) WHERE status = 'failed';
 ```
 
 Os dados ficam no volume Docker `postgres_data` e **persistem** entre restarts da API.
@@ -804,7 +850,7 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 | `api` | `payment_api` | 8080 | API Go |
 | `outbox` | `payment_outbox` | — | Relay: publica eventos pendentes da tabela `outbox_events` |
 | `consumer` | `payment_consumer` | — | Consome `payment.created`, autoriza no PSP e conclui/recusa pagamentos |
-| `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed` e entrega webhooks assinados |
+| `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed`, entrega webhooks assinados e reenvia falhas (retry com backoff) |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
@@ -858,7 +904,9 @@ docker compose down -v
 - [x] Outbox Pattern (publicação transacional de eventos)
 - [x] Webhook Service (notificações assinadas a lojistas)
 - [x] PSP Mock (autorização aprovada/recusada, base para falhas reais)
-- [ ] Retry de entregas de webhook e de autorizações que falharam
+- [x] Retry de entregas de webhook (backoff exponencial + estado `exhausted`)
+- [ ] DLQ para mensagens/entregas que esgotaram as tentativas
+- [ ] Retry da autorização no PSP (backoff no consumer, hoje é requeue imediato)
 - [ ] Use cases: falhar pagamento
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
@@ -894,7 +942,7 @@ docker compose down -v
 
 ↓
 
-⬜ Retry
+✅ Retry (entregas de webhook)
 
 ↓
 

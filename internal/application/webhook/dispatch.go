@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	domain "payment_service/internal/domain/webhook"
 )
@@ -16,22 +17,24 @@ type DispatchWebhook struct {
 	subs       domain.SubscriptionRepository
 	deliveries domain.DeliveryRepository
 	sender     domain.Sender
+	policy     BackoffPolicy
 }
 
 func NewDispatchWebhook(
 	subs domain.SubscriptionRepository,
 	deliveries domain.DeliveryRepository,
 	sender domain.Sender,
+	policy BackoffPolicy,
 ) *DispatchWebhook {
-	return &DispatchWebhook{subs: subs, deliveries: deliveries, sender: sender}
+	return &DispatchWebhook{subs: subs, deliveries: deliveries, sender: sender, policy: policy}
 }
 
 // Execute busca as assinaturas do tipo do evento e tenta entregar a cada uma.
 //
 // Erros de infraestrutura (buscar assinaturas / salvar entrega) são retornados
 // para que o consumer devolva a mensagem à fila (nack requeue). Já falhas HTTP de
-// um endpoint específico são registradas como entrega "failed" e NÃO derrubam o
-// lote — a reentrega de falhas fica a cargo do item de roadmap "Retry".
+// um endpoint específico são registradas como entrega "failed" e agendadas para
+// nova tentativa (backoff) — o RetryDeliveries fará a reentrega.
 func (uc *DispatchWebhook) Execute(ctx context.Context, eventType string, payload []byte) error {
 	subs, err := uc.subs.FindActiveByEventType(ctx, eventType)
 	if err != nil {
@@ -42,7 +45,7 @@ func (uc *DispatchWebhook) Execute(ctx context.Context, eventType string, payloa
 
 	for _, sub := range subs {
 		webhookID := deliveryID(sub.ID, eventType, aggregateID)
-		delivery := domain.NewDelivery(sub.ID, webhookID)
+		delivery := domain.NewDelivery(sub.ID, webhookID, eventType, payload)
 
 		status, sendErr := uc.sender.Send(ctx, domain.SendRequest{
 			URL:       sub.URL,
@@ -52,14 +55,7 @@ func (uc *DispatchWebhook) Execute(ctx context.Context, eventType string, payloa
 			Body:      payload,
 		})
 
-		switch {
-		case sendErr != nil:
-			delivery.Fail(sendErr.Error())
-		case status < 200 || status >= 300:
-			delivery.Fail(fmt.Sprintf("unexpected status code: %d", status))
-		default:
-			delivery.MarkDelivered()
-		}
+		applyAttemptOutcome(uc.policy, delivery, status, sendErr, time.Now().UTC())
 
 		if err := uc.deliveries.Save(ctx, delivery); err != nil {
 			return fmt.Errorf("save delivery: %w", err)

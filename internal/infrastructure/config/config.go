@@ -33,6 +33,14 @@ type OutboxConfig struct {
 type WebhookConfig struct {
 	Queue       string        // fila do webhook service
 	HTTPTimeout time.Duration // timeout do POST ao endpoint do lojista
+	Retry       RetryConfig
+}
+
+type RetryConfig struct {
+	MaxAttempts  int           // máximo de tentativas antes de esgotar (exhausted)
+	BaseDelay    time.Duration // atraso base do backoff exponencial
+	PollInterval time.Duration // intervalo de varredura do poller de retry
+	BatchSize    int           // máx. de entregas retentadas por ciclo
 }
 
 type PostgresConfig struct {
@@ -94,6 +102,12 @@ func Load() Config {
 		Webhook: WebhookConfig{
 			Queue:       envOrDefault("WEBHOOK_QUEUE", "webhook.payment"),
 			HTTPTimeout: durationOrDefault("WEBHOOK_HTTP_TIMEOUT", 5*time.Second),
+			Retry: RetryConfig{
+				MaxAttempts:  intOrDefault("WEBHOOK_RETRY_MAX_ATTEMPTS", 5),
+				BaseDelay:    durationOrDefault("WEBHOOK_RETRY_BASE_DELAY", 30*time.Second),
+				PollInterval: durationOrDefault("WEBHOOK_RETRY_POLL_INTERVAL", 10*time.Second),
+				BatchSize:    intOrDefault("WEBHOOK_RETRY_BATCH_SIZE", 100),
+			},
 		},
 		PSP: PSPConfig{
 			MockLatency: durationOrDefault("PSP_MOCK_LATENCY", 0),

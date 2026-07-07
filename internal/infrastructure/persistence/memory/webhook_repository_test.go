@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"testing"
+	"time"
 
 	"payment_service/internal/domain/webhook"
 )
@@ -45,9 +46,10 @@ func TestWebhookSubscriptionRepository(t *testing.T) {
 
 func TestWebhookDeliveryRepository(t *testing.T) {
 	ctx := context.Background()
-	repo := NewWebhookDeliveryRepository()
+	subs := NewWebhookSubscriptionRepository()
+	repo := NewWebhookDeliveryRepository(subs)
 
-	d := webhook.NewDelivery("sub-1", "evt-1")
+	d := webhook.NewDelivery("sub-1", "evt-1", "payment.completed", []byte(`{"id":"p"}`))
 	d.MarkDelivered()
 	if err := repo.Save(ctx, d); err != nil {
 		t.Fatal(err)
@@ -56,5 +58,40 @@ func TestWebhookDeliveryRepository(t *testing.T) {
 	all := repo.All()
 	if len(all) != 1 || all[0].Status != webhook.DeliveryDelivered {
 		t.Fatalf("expected 1 delivered, got %+v", all)
+	}
+}
+
+func TestWebhookDeliveryRepositoryFetchRetriable(t *testing.T) {
+	ctx := context.Background()
+	subs := NewWebhookSubscriptionRepository()
+	sub, _ := webhook.NewSubscription("https://a.test/h", "secret", "payment.completed")
+	_ = subs.Save(ctx, sub)
+
+	repo := NewWebhookDeliveryRepository(subs)
+
+	// Entrega falha, já no prazo → elegível.
+	due := webhook.NewDelivery(sub.ID, "evt-due", "payment.completed", []byte(`{}`))
+	due.MarkForRetry("boom", time.Now().Add(-time.Minute))
+	_ = repo.Save(ctx, due)
+
+	// Entrega falha, ainda no futuro → não elegível.
+	future := webhook.NewDelivery(sub.ID, "evt-future", "payment.completed", []byte(`{}`))
+	future.MarkForRetry("boom", time.Now().Add(time.Hour))
+	_ = repo.Save(ctx, future)
+
+	// Entrega já entregue → não elegível.
+	done := webhook.NewDelivery(sub.ID, "evt-done", "payment.completed", []byte(`{}`))
+	done.MarkDelivered()
+	_ = repo.Save(ctx, done)
+
+	items, err := repo.FetchRetriable(ctx, 10, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Delivery.EventID != "evt-due" {
+		t.Fatalf("expected only evt-due, got %+v", items)
+	}
+	if items[0].URL != sub.URL || items[0].Secret != sub.Secret {
+		t.Fatalf("expected joined subscription data, got url=%s secret=%s", items[0].URL, items[0].Secret)
 	}
 }

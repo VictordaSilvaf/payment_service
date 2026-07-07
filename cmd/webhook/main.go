@@ -28,7 +28,19 @@ func main() {
 	deliveries := postgres.NewWebhookDeliveryRepository(db)
 	sender := webhookclient.New(cfg.Webhook.HTTPTimeout)
 
-	dispatch := appwebhook.NewDispatchWebhook(subscriptions, deliveries, sender)
+	policy := appwebhook.BackoffPolicy{
+		MaxAttempts: cfg.Webhook.Retry.MaxAttempts,
+		BaseDelay:   cfg.Webhook.Retry.BaseDelay,
+	}
+
+	dispatch := appwebhook.NewDispatchWebhook(subscriptions, deliveries, sender, policy)
+	retrier := appwebhook.NewRetryDeliveries(
+		deliveries,
+		sender,
+		policy,
+		cfg.Webhook.Retry.PollInterval,
+		cfg.Webhook.Retry.BatchSize,
+	)
 
 	// Consome os eventos de pagamento publicados pelo relay e dispara os webhooks
 	// para as assinaturas ativas de cada tipo (concluído ou recusado pelo PSP).
@@ -52,7 +64,15 @@ func main() {
 	)
 	defer stop()
 
-	log.Println("🚀 Webhook Service iniciado")
+	// Poller de retry roda em paralelo ao consumer, reenviando entregas que
+	// falharam (backoff) até o limite de tentativas.
+	go func() {
+		if err := retrier.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("webhook retry loop stopped: %v", err)
+		}
+	}()
+
+	log.Println("🚀 Webhook Service iniciado (entrega + retry)")
 
 	if err := subscriber.Start(ctx); err != nil &&
 		!errors.Is(err, context.Canceled) {

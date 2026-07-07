@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
 	"payment_service/internal/domain/webhook"
 )
@@ -46,21 +47,65 @@ func (r *WebhookSubscriptionRepository) FindActiveByEventType(_ context.Context,
 	return out, nil
 }
 
-// WebhookDeliveryRepository é uma implementação em memória para testes.
-type WebhookDeliveryRepository struct {
-	mu         sync.Mutex
-	deliveries []*webhook.Delivery
+// findActiveByID retorna a assinatura ativa com o id informado (ou nil). Auxiliar
+// interno usado pelo WebhookDeliveryRepository para o "join" do FetchRetriable.
+func (r *WebhookSubscriptionRepository) findActiveByID(id string) *webhook.Subscription {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, s := range r.subs {
+		if s.ID == id && s.Active {
+			return s
+		}
+	}
+	return nil
 }
 
-func NewWebhookDeliveryRepository() *WebhookDeliveryRepository {
-	return &WebhookDeliveryRepository{deliveries: make([]*webhook.Delivery, 0)}
+// WebhookDeliveryRepository é uma implementação em memória para testes. Guarda as
+// entregas indexadas por (subscription_id, event_id) para reproduzir o upsert do
+// Postgres, e usa o repositório de assinaturas para o "join" do FetchRetriable.
+type WebhookDeliveryRepository struct {
+	mu         sync.Mutex
+	deliveries map[string]*webhook.Delivery
+	subs       *WebhookSubscriptionRepository
+}
+
+func NewWebhookDeliveryRepository(subs *WebhookSubscriptionRepository) *WebhookDeliveryRepository {
+	return &WebhookDeliveryRepository{
+		deliveries: make(map[string]*webhook.Delivery),
+		subs:       subs,
+	}
 }
 
 func (r *WebhookDeliveryRepository) Save(_ context.Context, d *webhook.Delivery) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.deliveries = append(r.deliveries, d)
+	// Upsert por (subscription_id, event_id), como no Postgres.
+	stored := *d
+	r.deliveries[d.SubscriptionID+":"+d.EventID] = &stored
 	return nil
+}
+
+func (r *WebhookDeliveryRepository) FetchRetriable(_ context.Context, limit int, now time.Time) ([]webhook.RetriableDelivery, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	items := make([]webhook.RetriableDelivery, 0, limit)
+	for _, d := range r.deliveries {
+		if d.Status != webhook.DeliveryFailed || d.NextAttemptAt.IsZero() || d.NextAttemptAt.After(now) {
+			continue
+		}
+		sub := r.subs.findActiveByID(d.SubscriptionID)
+		if sub == nil {
+			continue
+		}
+		clone := *d
+		items = append(items, webhook.RetriableDelivery{Delivery: &clone, URL: sub.URL, Secret: sub.Secret})
+		if len(items) == limit {
+			break
+		}
+	}
+	return items, nil
 }
 
 // All expõe as entregas gravadas (auxiliar de testes).
@@ -68,7 +113,9 @@ func (r *WebhookDeliveryRepository) All() []*webhook.Delivery {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	out := make([]*webhook.Delivery, len(r.deliveries))
-	copy(out, r.deliveries)
+	out := make([]*webhook.Delivery, 0, len(r.deliveries))
+	for _, d := range r.deliveries {
+		out = append(out, d)
+	}
 	return out
 }

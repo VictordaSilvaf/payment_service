@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	domain "payment_service/internal/domain/webhook"
 	"payment_service/internal/infrastructure/persistence/memory"
 )
+
+// testPolicy permite ao menos uma retentativa antes de esgotar, então a primeira
+// falha resulta em status "failed" (agendado), não "exhausted".
+var testPolicy = BackoffPolicy{MaxAttempts: 3, BaseDelay: time.Minute}
 
 type stubSender struct {
 	status int
@@ -40,10 +45,10 @@ func TestDispatchDeliversToActiveSubscriptions(t *testing.T) {
 	newSubscription(t, subs, "payment.completed")
 	newSubscription(t, subs, "payment.created") // não deve receber
 
-	deliveries := memory.NewWebhookDeliveryRepository()
+	deliveries := memory.NewWebhookDeliveryRepository(subs)
 	sender := &stubSender{status: 200}
 
-	uc := NewDispatchWebhook(subs, deliveries, sender)
+	uc := NewDispatchWebhook(subs, deliveries, sender, testPolicy)
 	payload := []byte(`{"id":"pay-1","status":"completed"}`)
 
 	if err := uc.Execute(ctx, "payment.completed", payload); err != nil {
@@ -66,9 +71,9 @@ func TestDispatchRecordsFailureOnNon2xx(t *testing.T) {
 	ctx := context.Background()
 	subs := memory.NewWebhookSubscriptionRepository()
 	newSubscription(t, subs, "payment.completed")
-	deliveries := memory.NewWebhookDeliveryRepository()
+	deliveries := memory.NewWebhookDeliveryRepository(subs)
 
-	uc := NewDispatchWebhook(subs, deliveries, &stubSender{status: 500})
+	uc := NewDispatchWebhook(subs, deliveries, &stubSender{status: 500}, testPolicy)
 	if err := uc.Execute(ctx, "payment.completed", []byte(`{"id":"p"}`)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,9 +88,9 @@ func TestDispatchRecordsFailureOnSenderError(t *testing.T) {
 	ctx := context.Background()
 	subs := memory.NewWebhookSubscriptionRepository()
 	newSubscription(t, subs, "payment.completed")
-	deliveries := memory.NewWebhookDeliveryRepository()
+	deliveries := memory.NewWebhookDeliveryRepository(subs)
 
-	uc := NewDispatchWebhook(subs, deliveries, &stubSender{err: errors.New("timeout")})
+	uc := NewDispatchWebhook(subs, deliveries, &stubSender{err: errors.New("timeout")}, testPolicy)
 	if err := uc.Execute(ctx, "payment.completed", []byte(`{"id":"p"}`)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,7 +109,7 @@ func TestDispatchStableDeliveryID(t *testing.T) {
 	subs := memory.NewWebhookSubscriptionRepository()
 	sub := newSubscription(t, subs, "payment.completed")
 	sender := &stubSender{status: 200}
-	uc := NewDispatchWebhook(subs, memory.NewWebhookDeliveryRepository(), sender)
+	uc := NewDispatchWebhook(subs, memory.NewWebhookDeliveryRepository(subs), sender, testPolicy)
 	payload := []byte(`{"id":"pay-1"}`)
 
 	if err := uc.Execute(ctx, "payment.completed", payload); err != nil {
@@ -127,7 +132,7 @@ func TestDispatchStableDeliveryID(t *testing.T) {
 }
 
 func TestDispatchReturnsErrorWhenSubsRepoFails(t *testing.T) {
-	uc := NewDispatchWebhook(&errorSubsRepo{}, memory.NewWebhookDeliveryRepository(), &stubSender{status: 200})
+	uc := NewDispatchWebhook(&errorSubsRepo{}, memory.NewWebhookDeliveryRepository(memory.NewWebhookSubscriptionRepository()), &stubSender{status: 200}, testPolicy)
 	if err := uc.Execute(context.Background(), "payment.completed", []byte(`{}`)); err == nil {
 		t.Fatal("expected error when subscription repo fails")
 	}
