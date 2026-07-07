@@ -13,8 +13,10 @@ import (
 // Tipos/rotas dos eventos emitidos após a autorização no PSP. O relay usa como
 // routing key; o webhook service liga a fila a essas chaves.
 const (
-	eventPaymentCompleted = "payment.completed"
-	eventPaymentFailed    = "payment.failed"
+	eventPaymentAuthorized = "payment.authorized"
+	eventPaymentCompleted  = "payment.completed"
+	eventPaymentFailed     = "payment.failed"
+	eventPaymentRefunded   = "payment.refunded"
 )
 
 type ProcessPaymentInput struct {
@@ -99,6 +101,14 @@ func (uc *ProcessPayment) authorize(ctx context.Context, p *payment.Payment) (ps
 // devolve o tipo de evento correspondente.
 func (uc *ProcessPayment) applyOutcome(p *payment.Payment, result psp.AuthorizationResult) (string, error) {
 	if result.Outcome == psp.OutcomeApproved {
+		// Captura manual: apenas autoriza (reserva os fundos) e aguarda a captura
+		// explícita via API. Captura automática: liquida imediatamente.
+		if p.CaptureMethod == payment.CaptureManual {
+			if err := p.MarkAuthorized(); err != nil {
+				return "", err
+			}
+			return eventPaymentAuthorized, nil
+		}
 		if err := p.Complete(); err != nil {
 			return "", err
 		}

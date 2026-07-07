@@ -56,3 +56,38 @@ func TestMockGatewayRespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected error on cancelled context")
 	}
 }
+
+func TestMockGatewayCapture(t *testing.T) {
+	g := NewMockGateway(0)
+	id, err := g.Capture(context.Background(), newPayment(t, 1000))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected capture provider id")
+	}
+}
+
+func TestMockGatewayRefund(t *testing.T) {
+	g := NewMockGateway(0)
+	id, err := g.Refund(context.Background(), newPayment(t, 1000), 500)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected refund provider id")
+	}
+}
+
+func TestMockGatewayCaptureRefundRespectContext(t *testing.T) {
+	g := NewMockGateway(50 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := g.Capture(ctx, newPayment(t, 1000)); err == nil {
+		t.Fatal("expected error capturing on cancelled context")
+	}
+	if _, err := g.Refund(ctx, newPayment(t, 1000), 100); err == nil {
+		t.Fatal("expected error refunding on cancelled context")
+	}
+}

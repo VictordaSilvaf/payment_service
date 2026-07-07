@@ -28,7 +28,7 @@ func (r *PaymentRepository) FindAll(_ context.Context, page, limit, _, _, _ stri
 
 	all := make([]*payment.Payment, 0, len(r.payments))
 	for _, p := range r.payments {
-		all = append(all, p)
+		all = append(all, clonePayment(p))
 	}
 
 	total := len(all)
@@ -49,7 +49,7 @@ func (r *PaymentRepository) Save(_ context.Context, p *payment.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.payments[p.ID] = p
+	r.payments[p.ID] = clonePayment(p)
 	return nil
 }
 
@@ -61,7 +61,7 @@ func (r *PaymentRepository) Update(_ context.Context, p *payment.Payment) error 
 		return payment.ErrNotFound
 	}
 
-	r.payments[p.ID] = p
+	r.payments[p.ID] = clonePayment(p)
 	return nil
 }
 
@@ -74,7 +74,14 @@ func (r *PaymentRepository) FindByID(_ context.Context, id string) (*payment.Pay
 		return nil, payment.ErrNotFound
 	}
 
-	return p, nil
+	return clonePayment(p), nil
+}
+
+// clonePayment devolve uma cópia independente para não vazar o ponteiro guardado
+// no mapa — assim mutações do chamador só persistem via Update, como num banco real.
+func clonePayment(p *payment.Payment) *payment.Payment {
+	cloned := *p
+	return &cloned
 }
 
 func (r *PaymentRepository) Delete(_ context.Context, id string) error {

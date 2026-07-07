@@ -23,6 +23,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 		v1.POST("/payments", middleware.Idempotency(), cfg.PaymentHandler.Create)
 		v1.GET("/payments/:id", cfg.PaymentHandler.GetByID)
 		v1.GET("/payments", cfg.PaymentHandler.List)
+		v1.POST("/payments/:id/capture", cfg.PaymentHandler.Capture)
+		v1.POST("/payments/:id/refund", cfg.PaymentHandler.Refund)
 
 		// Registrado apenas quando o handler está configurado (nil em alguns testes).
 		if cfg.WebhookHandler != nil {

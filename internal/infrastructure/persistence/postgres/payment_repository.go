@@ -28,9 +28,10 @@ func (r *PaymentRepository) db(ctx context.Context) executor {
 
 func (r *PaymentRepository) Save(ctx context.Context, p *payment.Payment) error {
 	_, err := r.db(ctx).Exec(ctx, `
-		INSERT INTO payments (id, amount, currency, status, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status), p.CreatedAt)
+		INSERT INTO payments (id, amount, currency, status, capture_method, installments, refunded_amount, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status),
+		string(p.CaptureMethod), p.Installments, p.RefundedAmount, p.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("save payment: %w", err)
 	}
@@ -40,9 +41,9 @@ func (r *PaymentRepository) Save(ctx context.Context, p *payment.Payment) error 
 func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) error {
 	tag, err := r.db(ctx).Exec(ctx, `
 		UPDATE payments
-		SET amount = $2, currency = $3, status = $4
+		SET amount = $2, currency = $3, status = $4, refunded_amount = $5
 		WHERE id = $1
-	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status))
+	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status), p.RefundedAmount)
 	if err != nil {
 		return fmt.Errorf("update payment: %w", err)
 	}
@@ -54,7 +55,7 @@ func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) erro
 
 func (r *PaymentRepository) FindByID(ctx context.Context, id string) (*payment.Payment, error) {
 	row := r.db(ctx).QueryRow(ctx, `
-		SELECT id, amount, currency, status, created_at
+		SELECT id, amount, currency, status, capture_method, installments, refunded_amount, created_at
 		FROM payments
 		WHERE id = $1
 	`, id)
@@ -86,7 +87,7 @@ func (r *PaymentRepository) FindAll(ctx context.Context, page, limit, sort, orde
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, amount, currency, status, created_at
+		SELECT id, amount, currency, status, capture_method, installments, refunded_amount, created_at
 		FROM payments
 		%s
 		ORDER BY %s %s
@@ -140,14 +141,18 @@ type scannable interface {
 
 func scanPayment(row scannable) (*payment.Payment, error) {
 	var p payment.Payment
-	var status string
+	var status, captureMethod string
 
-	err := row.Scan(&p.ID, &p.Money.Amount, &p.Money.Currency, &status, &p.CreatedAt)
+	err := row.Scan(
+		&p.ID, &p.Money.Amount, &p.Money.Currency, &status,
+		&captureMethod, &p.Installments, &p.RefundedAmount, &p.CreatedAt,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	p.Status = payment.Status(status)
+	p.CaptureMethod = payment.CaptureMethod(captureMethod)
 	return &p, nil
 }
 

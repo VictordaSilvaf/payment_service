@@ -45,7 +45,16 @@ func NewCreatePayment(repo payment.Repository, outboxRepo outbox.Repository, tx 
 // de uma única transação (Outbox Pattern). A publicação no broker é feita depois,
 // de forma assíncrona, pelo relay — eliminando o problema de dual-write.
 func (uc *CreatePayment) Execute(ctx context.Context, req dto.CreatePaymentRequest) (*dto.PaymentResponse, error) {
-	p, err := payment.New(req.Amount, req.Currency)
+	installments := req.Installments
+	if installments == 0 {
+		installments = 1
+	}
+	captureMethod := payment.CaptureMethod(req.CaptureMethod)
+	if captureMethod == "" {
+		captureMethod = payment.CaptureAutomatic
+	}
+
+	p, err := payment.NewWithOptions(req.Amount, req.Currency, installments, captureMethod)
 	if err != nil {
 		return nil, err
 	}

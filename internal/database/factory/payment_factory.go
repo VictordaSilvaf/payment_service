@@ -59,12 +59,17 @@ func (f *PaymentFactory) Make() *payment.Payment {
 	createdAt := f.resolveCreatedAt()
 
 	return &payment.Payment{
-		ID:        uuid.New().String(),
-		Money:     payment.Money{Amount: amount, Currency: currency},
-		Status:    status,
-		CreatedAt: createdAt,
+		ID:            uuid.New().String(),
+		Money:         payment.Money{Amount: amount, Currency: currency},
+		Status:        status,
+		CaptureMethod: payment.CaptureAutomatic,
+		Installments:  f.rng.Intn(maxInstallments) + 1, // 1..12
+		CreatedAt:     createdAt,
 	}
 }
+
+// maxInstallments espelha o limite de parcelas do domínio para os dados semeados.
+const maxInstallments = 12
 
 func (f *PaymentFactory) MakeMany(count int) []*payment.Payment {
 	payments := make([]*payment.Payment, count)
@@ -78,7 +83,7 @@ func (f *PaymentFactory) resolveAmount() int64 {
 	if f.amount != nil {
 		return *f.amount
 	}
-	return int64(f.rng.Intn(990_000)+1_000) // 10.00 to 9900.00 in cents
+	return int64(f.rng.Intn(990_000) + 1_000) // 10.00 to 9900.00 in cents
 }
 
 func (f *PaymentFactory) resolveCurrency() string {

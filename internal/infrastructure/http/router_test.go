@@ -26,6 +26,8 @@ func TestNewRouter(t *testing.T) {
 			usecase.NewCreatePayment(repo, memory.NewOutboxRepository(), nil),
 			usecase.NewGetPayment(repo),
 			usecase.NewListPayment(repo),
+			nil,
+			nil,
 			idempotencyService,
 		),
 	})

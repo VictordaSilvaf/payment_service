@@ -88,6 +88,8 @@ func buildMessage(eventType string, evt paymentEventPayload) string {
 		return fmt.Sprintf("Seu pagamento de %s foi aprovado. ✅", amount)
 	case "payment.failed":
 		return fmt.Sprintf("Seu pagamento de %s foi recusado. ❌", amount)
+	case "payment.refunded":
+		return fmt.Sprintf("Seu pagamento de %s foi estornado. 💸", amount)
 	default:
 		return fmt.Sprintf("Atualização do seu pagamento de %s: %s.", amount, evt.Status)
 	}

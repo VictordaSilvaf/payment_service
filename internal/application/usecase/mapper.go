@@ -7,10 +7,13 @@ import (
 
 func toPaymentResponse(p *payment.Payment) *dto.PaymentResponse {
 	return &dto.PaymentResponse{
-		ID:        p.ID,
-		Amount:    p.Money.Amount,
-		Currency:  p.Money.Currency,
-		Status:    string(p.Status),
-		CreatedAt: p.CreatedAt,
+		ID:             p.ID,
+		Amount:         p.Money.Amount,
+		Currency:       p.Money.Currency,
+		Status:         string(p.Status),
+		CaptureMethod:  string(p.CaptureMethod),
+		Installments:   p.Installments,
+		RefundedAmount: p.RefundedAmount,
+		CreatedAt:      p.CreatedAt,
 	}
 }

@@ -43,11 +43,11 @@ func main() {
 	)
 
 	// Consome os eventos de pagamento publicados pelo relay e dispara os webhooks
-	// para as assinaturas ativas de cada tipo (concluído ou recusado pelo PSP).
+	// para as assinaturas ativas de cada tipo (concluído, recusado ou estornado).
 	subscriber, err := rabbitmq.NewSubscriber(
 		cfg.RabbitMQ,
 		cfg.Webhook.Queue,
-		[]string{"payment.completed", "payment.failed"},
+		[]string{"payment.completed", "payment.failed", "payment.refunded"},
 		func(ctx context.Context, routingKey string, body []byte) error {
 			return dispatch.Execute(ctx, routingKey, body)
 		},

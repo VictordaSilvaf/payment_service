@@ -15,12 +15,24 @@ import (
 
 // stubGateway simula o PSP nos testes, devolvendo um resultado/erro fixo.
 type stubGateway struct {
-	result psp.AuthorizationResult
-	err    error
+	result     psp.AuthorizationResult
+	err        error
+	captureID  string
+	captureErr error
+	refundID   string
+	refundErr  error
 }
 
 func (g stubGateway) Authorize(_ context.Context, _ *payment.Payment) (psp.AuthorizationResult, error) {
 	return g.result, g.err
+}
+
+func (g stubGateway) Capture(_ context.Context, _ *payment.Payment) (string, error) {
+	return g.captureID, g.captureErr
+}
+
+func (g stubGateway) Refund(_ context.Context, _ *payment.Payment, _ int64) (string, error) {
+	return g.refundID, g.refundErr
 }
 
 // passthroughTx executa a função direto, sem transação real (para testes).

@@ -35,12 +35,12 @@ func main() {
 	)
 
 	// Consome os eventos de pagamento publicados pelo relay e notifica o usuário
-	// final de cada resultado (concluído ou recusado). Falhas de envio são
-	// retentadas e, se persistirem, encaminhadas à DLQ pelo Subscriber.
+	// final de cada resultado (concluído, recusado ou estornado). Falhas de envio
+	// são retentadas e, se persistirem, encaminhadas à DLQ pelo Subscriber.
 	subscriber, err := rabbitmq.NewSubscriber(
 		cfg.RabbitMQ,
 		cfg.Notification.Queue,
-		[]string{"payment.completed", "payment.failed"},
+		[]string{"payment.completed", "payment.failed", "payment.refunded"},
 		func(ctx context.Context, routingKey string, body []byte) error {
 			return notify.Execute(ctx, routingKey, body)
 		},

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,19 +17,29 @@ import (
 	"payment_service/internal/domain/payment"
 	"payment_service/internal/infrastructure/http/middleware"
 	"payment_service/internal/infrastructure/persistence/memory"
+	"payment_service/internal/infrastructure/psp"
 	"payment_service/internal/testutil"
 )
 
 func setupPaymentRouter(t *testing.T) *gin.Engine {
+	router, _ := setupPaymentRouterWithRepo(t)
+	return router
+}
+
+func setupPaymentRouterWithRepo(t *testing.T) (*gin.Engine, *memory.PaymentRepository) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	repo := memory.NewPaymentRepository()
+	outboxRepo := memory.NewOutboxRepository()
+	gateway := psp.NewMockGateway(0)
 	idempotencyService := idempotency.NewService(testutil.NewMemoryIdempotencyRepo())
 	paymentHandler := NewPaymentHandler(
-		usecase.NewCreatePayment(repo, memory.NewOutboxRepository(), nil),
+		usecase.NewCreatePayment(repo, outboxRepo, nil),
 		usecase.NewGetPayment(repo),
 		usecase.NewListPayment(repo),
+		usecase.NewCapturePayment(repo, gateway, outboxRepo, nil),
+		usecase.NewRefundPayment(repo, gateway, outboxRepo, nil),
 		idempotencyService,
 	)
 
@@ -37,8 +48,10 @@ func setupPaymentRouter(t *testing.T) *gin.Engine {
 	router.POST("/api/v1/payments", middleware.Idempotency(), paymentHandler.Create)
 	router.GET("/api/v1/payments/:id", paymentHandler.GetByID)
 	router.GET("/api/v1/payments", paymentHandler.List)
+	router.POST("/api/v1/payments/:id/capture", paymentHandler.Capture)
+	router.POST("/api/v1/payments/:id/refund", paymentHandler.Refund)
 
-	return router
+	return router, repo
 }
 
 func TestHealthHandlerPing(t *testing.T) {
@@ -185,6 +198,126 @@ func TestPaymentHandlerCreateKeyConflict(t *testing.T) {
 	}
 }
 
+func TestPaymentHandlerCaptureSuccess(t *testing.T) {
+	router, repo := setupPaymentRouterWithRepo(t)
+
+	p, _ := payment.NewWithOptions(1000, "BRL", 1, payment.CaptureManual)
+	_ = p.MarkAuthorized()
+	if err := repo.Save(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/"+p.ID+"/capture", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var res dto.PaymentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != string(payment.StatusCompleted) {
+		t.Fatalf("expected completed, got %s", res.Status)
+	}
+}
+
+func TestPaymentHandlerCaptureConflict(t *testing.T) {
+	router, repo := setupPaymentRouterWithRepo(t)
+
+	p, _ := payment.New(1000, "BRL") // pending, cannot capture
+	if err := repo.Save(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/"+p.ID+"/capture", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", w.Code)
+	}
+}
+
+func TestPaymentHandlerRefundSuccess(t *testing.T) {
+	router, repo := setupPaymentRouterWithRepo(t)
+
+	p, _ := payment.New(1000, "BRL")
+	_ = p.Complete()
+	if err := repo.Save(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"amount": 400})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/"+p.ID+"/refund", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var res dto.PaymentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != string(payment.StatusPartiallyRefunded) || res.RefundedAmount != 400 {
+		t.Fatalf("unexpected refund result: %+v", res)
+	}
+}
+
+func TestPaymentHandlerRefundFullWithoutBody(t *testing.T) {
+	router, repo := setupPaymentRouterWithRepo(t)
+
+	p, _ := payment.New(1000, "BRL")
+	_ = p.Complete()
+	if err := repo.Save(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/"+p.ID+"/refund", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var res dto.PaymentResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Status != string(payment.StatusRefunded) {
+		t.Fatalf("expected fully refunded, got %s", res.Status)
+	}
+}
+
+func TestPaymentHandlerRefundNotFound(t *testing.T) {
+	router := setupPaymentRouter(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/missing/refund", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestPaymentHandlerRefundInvalidJSON(t *testing.T) {
+	router := setupPaymentRouter(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/whatever/refund", bytes.NewReader([]byte(`{invalid`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestHashRequest(t *testing.T) {
 	req := dto.CreatePaymentRequest{Amount: 100, Currency: "BRL"}
 	hash1, err := hashRequest(req)
@@ -223,6 +356,8 @@ func TestPaymentHandlerCreateInternalError(t *testing.T) {
 		usecase.NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, memory.NewOutboxRepository(), nil),
 		usecase.NewGetPayment(memory.NewPaymentRepository()),
 		usecase.NewListPayment(memory.NewPaymentRepository()),
+		nil,
+		nil,
 		idempotencyService,
 	)
 
@@ -249,6 +384,8 @@ func TestPaymentHandlerListInternalError(t *testing.T) {
 		usecase.NewCreatePayment(memory.NewPaymentRepository(), memory.NewOutboxRepository(), nil),
 		usecase.NewGetPayment(memory.NewPaymentRepository()),
 		usecase.NewListPayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}),
+		nil,
+		nil,
 		idempotency.NewService(testutil.NewMemoryIdempotencyRepo()),
 	)
 
@@ -264,7 +401,7 @@ func TestPaymentHandlerListInternalError(t *testing.T) {
 
 func TestPaymentHandlerHandleError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h := NewPaymentHandler(nil, nil, nil, nil)
+	h := NewPaymentHandler(nil, nil, nil, nil, nil, nil)
 
 	cases := []struct {
 		name       string
@@ -273,6 +410,9 @@ func TestPaymentHandlerHandleError(t *testing.T) {
 	}{
 		{"not found", payment.ErrNotFound, http.StatusNotFound},
 		{"invalid amount", payment.ErrInvalidAmount, http.StatusBadRequest},
+		{"invalid installments", payment.ErrInvalidInstallments, http.StatusBadRequest},
+		{"refund exceeds", payment.ErrRefundExceedsAmount, http.StatusBadRequest},
+		{"invalid transition", payment.ErrInvalidTransition, http.StatusConflict},
 		{"invalid key", idempotency.ErrInvalidKey, http.StatusBadRequest},
 		{"processing", idempotency.ErrAlreadyProcessing, http.StatusConflict},
 		{"key exists", idempotency.ErrKeyAlreadyExists, http.StatusConflict},

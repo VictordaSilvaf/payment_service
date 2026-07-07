@@ -24,7 +24,7 @@ API REST em Go para gerenciamento de pagamentos, construída com **Domain-Driven
 
 ## Visão geral
 
-O **Payment Service** expõe uma API HTTP para criar, consultar e listar pagamentos. Cada pagamento possui valor (`amount`), moeda (`currency`) e status (`pending`, `completed`, `failed`).
+O **Payment Service** expõe uma API HTTP para criar, consultar, listar, **capturar** e **estornar** pagamentos. Cada pagamento possui valor (`amount`), moeda (`currency`), número de parcelas (`installments`), método de captura (`capture_method`) e status (`pending`, `authorized`, `completed`, `failed`, `refunded`, `partially_refunded`).
 
 Principais capacidades:
 
@@ -32,10 +32,13 @@ Principais capacidades:
 - **Idempotência** no `POST /payments` via Redis (header `Idempotency-Key`)
 - **Eventos** publicados no RabbitMQ ao criar um pagamento (`payment.created`)
 - **Outbox Pattern**: o evento é gravado na mesma transação do pagamento e publicado depois por um relay (sem dual-write)
-- **Consumer** assíncrono que consome `payment.created`, **autoriza no PSP** e transiciona o pagamento (`pending` → `completed`/`failed`), emitindo `payment.completed` ou `payment.failed`
-- **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa), com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
-- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído ou recusado, com **retry** (backoff exponencial + limite de tentativas) para entregas que falharam
-- **Notification Service**: notifica o **usuário final** (e-mail/SMS/push — mock via log) quando o pagamento é concluído ou recusado, com dedup por id determinístico e reentrega via DLQ
+- **Consumer** assíncrono que consome `payment.created`, **autoriza no PSP** e transiciona o pagamento, emitindo `payment.completed`, `payment.authorized` ou `payment.failed`
+- **Captura automática ou manual** (`capture_method`): na automática o pagamento é liquidado logo após a autorização (`pending` → `completed`); na manual a autorização apenas reserva os fundos (`pending` → `authorized`) e a captura é disparada depois por `POST /payments/:id/capture` (`authorized` → `completed`)
+- **Estorno** total ou parcial (`POST /payments/:id/refund`): `completed` → `partially_refunded` → `refunded`, emitindo `payment.refunded`
+- **Parcelamento** (`installments`, 1–12) registrado no pagamento
+- **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa) e sempre aceita captura/estorno, com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
+- **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído, recusado ou estornado, com **retry** (backoff exponencial + limite de tentativas) para entregas que falharam
+- **Notification Service**: notifica o **usuário final** (e-mail/SMS/push — mock via log) quando o pagamento é concluído, recusado ou estornado, com dedup por id determinístico e reentrega via DLQ
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -130,9 +133,10 @@ payment_service/
 ├── db/migrations/                           # SQL versionado (golang-migrate)
 ├── internal/
 │   ├── domain/payment/                      # Núcleo do domínio
-│   │   ├── payment.go                       # Entidade
+│   │   ├── payment.go                       # Entidade + transições (autorizar, capturar, estornar)
 │   │   ├── money.go                         # Value object
-│   │   ├── status.go                        # Value object
+│   │   ├── status.go                        # Value object (estados do pagamento)
+│   │   ├── capture_method.go               # Value object (automatic/manual)
 │   │   ├── page.go                          # Resultado paginado
 │   │   ├── publisher.go                     # Porta EventPublisher
 │   │   ├── errors.go
@@ -155,7 +159,7 @@ payment_service/
 │   │   ├── webhook/                         # DispatchWebhook + RetryDeliveries + gestão de assinaturas
 │   │   ├── notification/                    # NotifyPayment (monta e envia a notificação)
 │   │   ├── payment/                         # Mapper e validator
-│   │   └── usecase/                         # Casos de uso
+│   │   └── usecase/                         # Casos de uso (criar, buscar, listar, processar, capturar, estornar)
 │   ├── database/
 │   │   ├── migrate/                         # Runner de migrations
 │   │   ├── factory/                         # Factories de dados fake
@@ -320,6 +324,25 @@ sequenceDiagram
 > Se o consumer **não estiver rodando**, os eventos ficam acumulados na fila e os pagamentos permanecem em `pending` até um consumer conectar e processá-los.
 
 > A **recusa** do PSP é uma decisão de negócio (não é erro): o pagamento vira `failed` e o evento `payment.failed` é emitido. Já um **erro** do PSP (timeout/indisponível) é transitório: o consumer retenta algumas vezes e, se persistir, manda a mensagem para a **DLQ** em vez de reenfileirar para sempre (ver seção *Dead Letter Queue*).
+
+### Ciclo de vida do pagamento (estados)
+
+Captura **automática** liquida logo após a autorização; captura **manual** passa por `authorized` e exige uma chamada explícita de captura. Depois de capturado, o pagamento pode ser estornado (total ou parcialmente).
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: criar
+    pending --> completed: autoriza (captura automática)
+    pending --> authorized: autoriza (captura manual)
+    pending --> failed: recusado pelo PSP
+    authorized --> completed: capturar
+    completed --> partially_refunded: estorno parcial
+    completed --> refunded: estorno total
+    partially_refunded --> partially_refunded: estorno parcial
+    partially_refunded --> refunded: estorno do restante
+    failed --> [*]
+    refunded --> [*]
+```
 
 ### Fluxo assíncrono — Entregar webhook (Webhook Service)
 
@@ -506,6 +529,8 @@ flowchart LR
 | `POST` | `/api/v1/payments` | Criar pagamento (**requer** `Idempotency-Key`) |
 | `GET` | `/api/v1/payments/:id` | Buscar pagamento por ID |
 | `GET` | `/api/v1/payments` | Listar pagamentos (paginado) |
+| `POST` | `/api/v1/payments/:id/capture` | Capturar um pagamento autorizado (captura manual) |
+| `POST` | `/api/v1/payments/:id/refund` | Estornar um pagamento (total ou parcial) |
 | `POST` | `/api/v1/webhooks` | Registrar assinatura de webhook |
 | `GET` | `/api/v1/webhooks` | Listar assinaturas de webhook |
 
@@ -520,11 +545,13 @@ curl http://localhost:8080/ping
 
 **Criar pagamento**
 
+`installments` (padrão `1`) e `capture_method` (`automatic` padrão, ou `manual`) são opcionais.
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/payments \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: $(uuidgen)" \
-  -d '{"amount": 1000, "currency": "BRL"}'
+  -d '{"amount": 1000, "currency": "BRL", "installments": 3, "capture_method": "manual"}'
 ```
 
 ```json
@@ -533,8 +560,39 @@ curl -X POST http://localhost:8080/api/v1/payments \
   "amount": 1000,
   "currency": "BRL",
   "status": "pending",
+  "capture_method": "manual",
+  "installments": 3,
+  "refunded_amount": 0,
   "created_at": "2026-07-06T22:53:41Z"
 }
+```
+
+**Capturar um pagamento autorizado** (fluxo `capture_method: manual`)
+
+Após a autorização (`status: authorized`), a captura liquida os fundos:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/payments/{id}/capture
+# 200 → { ..., "status": "completed" }
+# 409 → se o pagamento não estiver "authorized"
+```
+
+**Estornar um pagamento** (total ou parcial)
+
+O corpo é opcional: sem `amount` (ou `amount` ausente) estorna o saldo restante por completo.
+
+```bash
+# Estorno parcial de 400 centavos
+curl -X POST http://localhost:8080/api/v1/payments/{id}/refund \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 400}'
+# 200 → { ..., "status": "partially_refunded", "refunded_amount": 400 }
+
+# Estorno total do restante
+curl -X POST http://localhost:8080/api/v1/payments/{id}/refund
+# 200 → { ..., "status": "refunded" }
+# 400 → se o valor exceder o saldo estornável
+# 409 → se o pagamento não estiver "completed"/"partially_refunded"
 ```
 
 **Buscar por ID**
@@ -615,7 +673,7 @@ valid := hmac.Equal([]byte(expected), []byte(r.Header.Get("X-Webhook-Signature")
 | `limit` | `10` | Itens por página |
 | `sort` | `created_at` | Coluna de ordenação (`id`, `amount`, `currency`, `status`, `created_at`) |
 | `order` | `desc` | Direção (`asc` ou `desc`) |
-| `status` | — | Filtro opcional por status (`pending`, `completed`, `failed`) |
+| `status` | — | Filtro opcional por status (`pending`, `authorized`, `completed`, `failed`, `refunded`, `partially_refunded`) |
 
 ---
 
@@ -868,11 +926,14 @@ O schema é versionado em `db/migrations/`:
 
 ```sql
 CREATE TABLE payments (
-    id          UUID PRIMARY KEY,
-    amount      BIGINT NOT NULL CHECK (amount > 0),
-    currency    VARCHAR(3) NOT NULL,
-    status      VARCHAR(20) NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID PRIMARY KEY,
+    amount          BIGINT NOT NULL CHECK (amount > 0),
+    currency        VARCHAR(3) NOT NULL,
+    status          VARCHAR(20) NOT NULL,   -- pending | authorized | completed | failed | refunded | partially_refunded
+    capture_method  VARCHAR(20) NOT NULL DEFAULT 'automatic', -- automatic | manual
+    installments    INT NOT NULL DEFAULT 1, -- número de parcelas (1..12)
+    refunded_amount BIGINT NOT NULL DEFAULT 0, -- total já estornado (centavos)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Outbox Pattern: eventos gravados na mesma transação do pagamento
@@ -950,8 +1011,8 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 | `api` | `payment_api` | 8080 | API Go |
 | `outbox` | `payment_outbox` | — | Relay: publica eventos pendentes da tabela `outbox_events` |
 | `consumer` | `payment_consumer` | — | Consome `payment.created`, autoriza no PSP e conclui/recusa pagamentos |
-| `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed`, entrega webhooks assinados e reenvia falhas (retry com backoff) |
-| `notification` | `payment_notification` | — | Consome `payment.completed`/`payment.failed` e notifica o usuário final (mock via log) |
+| `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed`/`payment.refunded`, entrega webhooks assinados e reenvia falhas (retry com backoff) |
+| `notification` | `payment_notification` | — | Consome `payment.completed`/`payment.failed`/`payment.refunded` e notifica o usuário final (mock via log) |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
@@ -965,8 +1026,10 @@ Painel RabbitMQ: [http://localhost:15672](http://localhost:15672) (credenciais c
 | Evento | Exchange | Routing key | Payload |
 |---|---|---|---|
 | Pagamento criado | `payment.events` | `payment.created` | `{ id, amount, currency, status, created_at }` |
-| Pagamento concluído | `payment.events` | `payment.completed` | `{ id, amount, currency, status, created_at }` |
+| Pagamento autorizado (captura manual) | `payment.events` | `payment.authorized` | `{ id, amount, currency, status, created_at }` |
+| Pagamento concluído/capturado | `payment.events` | `payment.completed` | `{ id, amount, currency, status, created_at }` |
 | Pagamento recusado | `payment.events` | `payment.failed` | `{ id, amount, currency, status, created_at }` |
+| Pagamento estornado | `payment.events` | `payment.refunded` | `{ id, amount, currency, status, created_at }` |
 
 ### Comandos úteis
 
@@ -1057,7 +1120,7 @@ docker compose down -v
 
 ↓
 
-⬜ **Payment Service** — evolui o núcleo de pagamentos (estornos, capturas, parcelamento, novos fluxos).
+✅ **Payment Service** — evoluiu o núcleo de pagamentos: captura manual (`authorized` → `completed`), estornos total/parcial (`refunded`/`partially_refunded`) e parcelamento (`installments`).
 
 ↓
 

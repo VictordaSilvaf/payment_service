@@ -13,6 +13,7 @@ import (
 	"payment_service/internal/infrastructure/http"
 	"payment_service/internal/infrastructure/http/handler"
 	"payment_service/internal/infrastructure/persistence/postgres"
+	"payment_service/internal/infrastructure/psp"
 )
 
 func main() {
@@ -48,9 +49,15 @@ func main() {
 	)
 	idempotencyService := idempotency.NewService(idempotencyRepo)
 
+	// Captura e estorno falam com o PSP de forma síncrona (ação do lojista via API),
+	// diferente da autorização, que é assíncrona (consumer).
+	gateway := psp.NewMockGateway(cfg.PSP.MockLatency)
+
 	createPayment := usecase.NewCreatePayment(repo, outboxRepo, txManager)
 	getPayment := usecase.NewGetPayment(repo)
 	listPayment := usecase.NewListPayment(repo)
+	capturePayment := usecase.NewCapturePayment(repo, gateway, outboxRepo, txManager)
+	refundPayment := usecase.NewRefundPayment(repo, gateway, outboxRepo, txManager)
 
 	webhookSubscriptions := postgres.NewWebhookSubscriptionRepository(pool)
 	createSubscription := appwebhook.NewCreateSubscription(webhookSubscriptions)
@@ -62,6 +69,8 @@ func main() {
 			createPayment,
 			getPayment,
 			listPayment,
+			capturePayment,
+			refundPayment,
 			idempotencyService,
 		),
 		WebhookHandler: handler.NewWebhookHandler(
