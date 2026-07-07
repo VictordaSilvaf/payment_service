@@ -914,68 +914,68 @@ docker compose down -v
 
 ## Roadmap
 
-✅ Payment API
+✅ **Payment API** — API REST (Gin) para criar, consultar e listar pagamentos.
 
 ↓
 
-✅ Redis Idempotência
+✅ **Redis Idempotência** — evita cobrança duplicada: mesma `Idempotency-Key` retorna a resposta original.
 
 ↓
 
-✅ Rabbit Publisher
+✅ **Rabbit Publisher** — publica eventos de pagamento (`payment.created`, etc.) no RabbitMQ.
 
 ↓
 
-✅ Rabbit Consumer
+✅ **Rabbit Consumer** — consome os eventos e processa os pagamentos de forma assíncrona.
 
 ↓
 
-✅ Outbox Pattern
+✅ **Outbox Pattern** — grava evento e estado na mesma transação; um relay publica depois (sem perda de evento).
 
 ↓
 
-✅ Webhook Service
+✅ **Webhook Service** — notifica lojistas via POST assinado (HMAC) quando o pagamento é concluído/recusado.
 
 ↓
 
-✅ PSP Mock
+✅ **PSP Mock** — simula o provedor de pagamento (aprova/recusa + latência) para exercitar falhas reais.
 
 ↓
 
-✅ Retry (entregas de webhook)
+✅ **Retry (entregas de webhook)** — reenvia entregas que falharam com backoff exponencial e limite de tentativas.
 
 ↓
 
-⬜ Dead Letter Queue
+⬜ **Dead Letter Queue** — isola mensagens/entregas que esgotaram as tentativas para análise, sem travar a fila.
 
 ↓
 
-⬜ Notification Service
+⬜ **Notification Service** — envia notificações ao usuário final (e-mail/SMS/push) a partir dos eventos.
 
 ↓
 
-⬜ payment Service
+⬜ **Payment Service** — evolui o núcleo de pagamentos (estornos, capturas, parcelamento, novos fluxos).
 
 ↓
 
-⬜ Audit Service
+⬜ **Audit Service** — registra trilha de auditoria imutável de todas as ações e mudanças de estado.
 
 ↓
 
-⬜ Saga
+⬜ **Saga** — coordena transações distribuídas com passos compensatórios quando algo falha no meio.
 
 ↓
 
-⬜ OpenTelemetry
+⬜ **OpenTelemetry** — instrumenta traces/métricas/logs para rastrear uma requisição ponta a ponta.
 
 ↓
 
-⬜ Grafana
+⬜ **Grafana** — dashboards para visualizar métricas, logs e traces dos serviços.
 
 ↓
 
-⬜ Prometheus
+⬜ **Prometheus** — coleta e armazena métricas para alertas e monitoramento.
 
 ↓
 
-⬜ Kubernetes
+⬜ **Kubernetes** — orquestra o deploy, escala e resiliência dos serviços em produção.
