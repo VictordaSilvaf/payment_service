@@ -22,7 +22,7 @@ seed-fresh:
 run:
 	go run ./cmd/api
 
-TEST_PACKAGES := ./internal/application/... ./internal/domain/... ./internal/infrastructure/cache/... ./internal/infrastructure/config/... ./internal/infrastructure/http/... ./internal/infrastructure/persistence/memory/... ./internal/infrastructure/psp/... ./internal/database/factory/...
+TEST_PACKAGES := ./internal/application/... ./internal/domain/... ./internal/infrastructure/cache/... ./internal/infrastructure/config/... ./internal/infrastructure/http/... ./internal/infrastructure/notification/... ./internal/infrastructure/persistence/memory/... ./internal/infrastructure/psp/... ./internal/database/factory/...
 
 test:
 	go test $(TEST_PACKAGES) -count=1

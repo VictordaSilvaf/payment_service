@@ -5,7 +5,7 @@ tmp_dir = "tmp_webhook"
   cmd = "go mod download && go build -buildvcs=false -o ./tmp_webhook/webhook ./cmd/webhook"
   entrypoint = "./tmp_webhook/webhook"
   include_ext = ["go"]
-  exclude_dir = ["tmp", "tmp_consumer", "tmp_outbox", "tmp_webhook", "vendor"]
+  exclude_dir = ["tmp", "tmp_consumer", "tmp_outbox", "tmp_webhook", "tmp_notification", "vendor"]
   delay = 500
   stop_on_error = true
 

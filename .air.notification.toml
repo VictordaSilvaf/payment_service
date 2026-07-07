@@ -1,9 +1,9 @@
 root = "."
-tmp_dir = "tmp"
+tmp_dir = "tmp_notification"
 
 [build]
-  cmd = "go mod download && go build -buildvcs=false -o ./tmp/api ./cmd/api"
-  entrypoint = "./tmp/api"
+  cmd = "go mod download && go build -buildvcs=false -o ./tmp_notification/notification ./cmd/notification"
+  entrypoint = "./tmp_notification/notification"
   include_ext = ["go"]
   exclude_dir = ["tmp", "tmp_consumer", "tmp_outbox", "tmp_webhook", "tmp_notification", "vendor"]
   delay = 500

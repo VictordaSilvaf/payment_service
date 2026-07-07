@@ -19,6 +19,12 @@ type Config struct {
 	Outbox          OutboxConfig
 	Webhook         WebhookConfig
 	PSP             PSPConfig
+	Notification    NotificationConfig
+}
+
+type NotificationConfig struct {
+	Queue   string // fila do notification service
+	Channel string // canal padrão de envio (email/sms/push)
 }
 
 type PSPConfig struct {
@@ -113,6 +119,10 @@ func Load() Config {
 		},
 		PSP: PSPConfig{
 			MockLatency: durationOrDefault("PSP_MOCK_LATENCY", 0),
+		},
+		Notification: NotificationConfig{
+			Queue:   envOrDefault("NOTIFICATION_QUEUE", "notification.payment"),
+			Channel: envOrDefault("NOTIFICATION_CHANNEL", "email"),
 		},
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),

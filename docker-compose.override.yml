@@ -37,5 +37,14 @@ services:
       - go_mod_cache:/go/pkg/mod
     restart: "no"
 
+  notification:
+    build:
+      dockerfile: Dockerfile.dev
+    command: ["sh", "-c", "go mod download && air -c .air.notification.toml"]
+    volumes:
+      - .:/app
+      - go_mod_cache:/go/pkg/mod
+    restart: "no"
+
 volumes:
   go_mod_cache:

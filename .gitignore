@@ -3,4 +3,5 @@ tmp/
 tmp_consumer/
 tmp_outbox/
 tmp_webhook/
+tmp_notification/
 coverage.out

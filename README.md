@@ -35,6 +35,7 @@ Principais capacidades:
 - **Consumer** assíncrono que consome `payment.created`, **autoriza no PSP** e transiciona o pagamento (`pending` → `completed`/`failed`), emitindo `payment.completed` ou `payment.failed`
 - **PSP Mock**: gateway simulado que aprova/recusa a autorização de forma determinística (par aprova, ímpar recusa), com latência configurável — a implementação real (Stripe/Adyen) entraria no lugar sem alterar o núcleo
 - **Webhook Service**: notifica endpoints externos (lojistas) via POST assinado (HMAC) quando um pagamento é concluído ou recusado, com **retry** (backoff exponencial + limite de tentativas) para entregas que falharam
+- **Notification Service**: notifica o **usuário final** (e-mail/SMS/push — mock via log) quando o pagamento é concluído ou recusado, com dedup por id determinístico e reentrega via DLQ
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -123,6 +124,7 @@ payment_service/
 │   ├── consumer/main.go                     # Composition root do consumer RabbitMQ
 │   ├── outbox/main.go                       # Composition root do relay do outbox
 │   ├── webhook/main.go                      # Composition root do webhook service
+│   ├── notification/main.go                 # Composition root do notification service
 │   ├── migrate/main.go                      # CLI de migrations
 │   └── seed/main.go                         # CLI de seeders
 ├── db/migrations/                           # SQL versionado (golang-migrate)
@@ -145,11 +147,13 @@ payment_service/
 │   │   ├── signature.go                     # Assinatura HMAC-SHA256
 │   │   ├── sender.go                        # Porta Sender
 │   │   └── repository.go                    # Portas Subscription/Delivery
+│   ├── domain/notification/                 # Notificação ao usuário + portas Notifier/Repository
 │   ├── application/
 │   │   ├── dto/                             # Objetos de transferência
 │   │   ├── idempotency/                     # Serviço e contratos de idempotência
 │   │   ├── outbox/                          # Relay (dispatcher) + porta Publisher
 │   │   ├── webhook/                         # DispatchWebhook + RetryDeliveries + gestão de assinaturas
+│   │   ├── notification/                    # NotifyPayment (monta e envia a notificação)
 │   │   ├── payment/                         # Mapper e validator
 │   │   └── usecase/                         # Casos de uso
 │   ├── database/
@@ -162,14 +166,15 @@ payment_service/
 │       ├── cache/redis/                     # Cliente Redis + idempotência
 │       ├── http/                            # Router, handlers, middleware
 │       │   └── webhookclient/               # Sender HTTP (entrega de webhooks)
-│       ├── messaging/rabbitmq/              # Adapter RabbitMQ (publisher, consumer, subscriber)
+│       ├── messaging/rabbitmq/              # Adapter RabbitMQ (publisher, consumer, subscriber, DLQ)
 │       ├── psp/                             # Adapter PSP mock (autorização)
+│       ├── notification/                    # Adapter Notifier mock (log)
 │       └── persistence/
-│           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, webhooks, TxManager)
+│           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, webhooks, notifications, TxManager)
 │           └── memory/                      # Adapter in-memory (testes)
 ├── docker-compose.yml                       # Orquestração (produção)
 ├── docker-compose.override.yml              # Hot-reload (dev, auto-carregado)
-├── Dockerfile                               # Build de produção (API + consumer + outbox + webhook)
+├── Dockerfile                               # Build de produção (API + consumer + outbox + webhook + notification)
 ├── Dockerfile.dev                           # Build de desenvolvimento (Air)
 ├── .air.toml                                # Hot-reload da API
 ├── .air.consumer.toml                       # Hot-reload do consumer
@@ -419,6 +424,41 @@ Inspecionar/drenar a DLQ pelo painel de gerenciamento (`http://localhost:15672`)
 # Quantas mensagens estão paradas em cada DLQ
 docker exec payment_rabbitmq rabbitmqctl list_queues name messages | grep '\.dlq'
 ```
+
+### Fluxo assíncrono — Notificar usuário (Notification Service)
+
+O Notification Service consome os mesmos eventos do webhook (`payment.completed`/`payment.failed`), mas o destinatário é o **usuário final** (não o lojista). Ele monta uma mensagem legível e a "envia" por um canal (mock via log). Reaproveita o `Subscriber` — então já herda **retry + DLQ** de graça.
+
+```mermaid
+sequenceDiagram
+    participant RMQ as RabbitMQ (fila notification.payment)
+    participant Sub as Subscriber
+    participant UC as NotifyPayment
+    participant Notifier as Notifier (mock/log)
+    participant Repo as NotificationRepository
+
+    RMQ->>Sub: entrega payment.completed / payment.failed
+    Sub->>UC: Execute(ctx, routingKey, payload)
+    UC->>UC: monta mensagem + id determinístico (dedup)
+    UC->>Notifier: Send(notification)
+    alt Enviado
+        Notifier-->>UC: ok
+        UC->>Repo: Save(status = sent)
+        Sub->>RMQ: Ack
+    else Falha de envio
+        Notifier-->>UC: erro
+        UC->>Repo: Save(status = failed)
+        UC-->>Sub: erro
+        Sub->>RMQ: retenta N× e, se persistir, → DLQ
+    end
+```
+
+Pontos importantes:
+
+- **Dedup**: o id da notificação é determinístico por `(pagamento, evento, canal)` — reprocessar o mesmo evento faz upsert, sem notificar o usuário duas vezes.
+- **Canal plugável**: a porta `Notifier` isola o meio (email/SMS/push). Hoje há um `LogNotifier` (mock); trocar por SendGrid/Twilio é só uma nova implementação.
+- **Confiabilidade**: falha de envio é gravada como `failed` e o erro é propagado ao `Subscriber`, que retenta (`RABBITMQ_MAX_RETRIES`) e, se persistir, manda à DLQ `notification.payment.dlq`.
+- **Destinatário**: como o pagamento não guarda dados do cliente, o mock deriva um e-mail de exemplo (`customer+<id>@example.com`). Num sistema real viria do cadastro do cliente.
 
 ### Infraestrutura Docker
 
@@ -689,6 +729,9 @@ go run ./cmd/consumer
 
 # Em outro terminal, rodar o webhook service (entrega payment.completed)
 go run ./cmd/webhook
+
+# Em outro terminal, rodar o notification service (notifica o usuário final)
+go run ./cmd/notification
 ```
 
 ---
@@ -809,6 +852,8 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `WEBHOOK_RETRY_POLL_INTERVAL` | `10s` | Intervalo de varredura das entregas falhas pelo poller de retry |
 | `WEBHOOK_RETRY_BATCH_SIZE` | `100` | Máx. de entregas reprocessadas por ciclo do poller |
 | `PSP_MOCK_LATENCY` | `0` | Latência simulada da autorização no PSP mock (ex.: `200ms`) |
+| `NOTIFICATION_QUEUE` | `notification.payment` | Fila do notification service (ligada a `payment.completed` e `payment.failed`) |
+| `NOTIFICATION_CHANNEL` | `email` | Canal padrão da notificação (`email`/`sms`/`push` — mock) |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
 > Dentro do Docker Compose, use os nomes dos serviços: `POSTGRES_HOST=postgres`, `REDIS_HOST=redis`, `RABBITMQ_HOST=rabbitmq`.
@@ -868,6 +913,20 @@ CREATE TABLE webhook_deliveries (
 -- Índice do poller de retry: entregas falhas já no prazo de nova tentativa
 CREATE INDEX idx_webhook_deliveries_retry
     ON webhook_deliveries (next_attempt_at) WHERE status = 'failed';
+
+-- Notificações ao usuário final (log/auditoria + dedup por id determinístico)
+CREATE TABLE notifications (
+    id          TEXT PRIMARY KEY,       -- hash(pagamento, evento, canal) → dedup
+    payment_id  UUID NOT NULL,
+    event_type  VARCHAR(50) NOT NULL,
+    channel     VARCHAR(20) NOT NULL,   -- email | sms | push
+    recipient   TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    status      VARCHAR(20) NOT NULL,   -- pending | sent | failed
+    last_error  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 ```
 
 Os dados ficam no volume Docker `postgres_data` e **persistem** entre restarts da API.
@@ -892,6 +951,7 @@ docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM
 | `outbox` | `payment_outbox` | — | Relay: publica eventos pendentes da tabela `outbox_events` |
 | `consumer` | `payment_consumer` | — | Consome `payment.created`, autoriza no PSP e conclui/recusa pagamentos |
 | `webhook` | `payment_webhook` | — | Consome `payment.completed`/`payment.failed`, entrega webhooks assinados e reenvia falhas (retry com backoff) |
+| `notification` | `payment_notification` | — | Consome `payment.completed`/`payment.failed` e notifica o usuário final (mock via log) |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
@@ -947,7 +1007,9 @@ docker compose down -v
 - [x] PSP Mock (autorização aprovada/recusada, base para falhas reais)
 - [x] Retry de entregas de webhook (backoff exponencial + estado `exhausted`)
 - [x] Retry de processamento no consumer + DLQ (DLX por fila, `<fila>.dlq`)
+- [x] Notification Service (notifica o usuário final via canal mock)
 - [ ] Reprocessamento automático da DLQ (hoje é manual pelo painel/CLI)
+- [ ] Canal real de notificação (e-mail/SMS/push) no lugar do mock
 - [ ] Use cases: falhar pagamento
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
@@ -991,7 +1053,7 @@ docker compose down -v
 
 ↓
 
-⬜ **Notification Service** — envia notificações ao usuário final (e-mail/SMS/push) a partir dos eventos.
+✅ **Notification Service** — envia notificações ao usuário final (e-mail/SMS/push — mock via log) a partir dos eventos.
 
 ↓
 
