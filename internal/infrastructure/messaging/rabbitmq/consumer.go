@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -22,6 +23,8 @@ type PaymentConsumer struct {
 	conn           *amqp.Connection
 	channel        *amqp.Channel
 	queue          string
+	maxRetries     int
+	retryDelay     time.Duration
 	processPayment *usecase.ProcessPayment
 }
 
@@ -53,10 +56,18 @@ func NewPaymentConsumer(
 		return nil, fmt.Errorf("declare exchange: %w", err)
 	}
 
-	// Declara a fila (idempotente). Parâmetros:
+	// Declara a DLX + DLQ e obtém os argumentos de dead-lettering da fila principal.
+	dlqArgs, err := declareDLQ(ch, cfg.Exchange, cfg.Queue)
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, err
+	}
+
+	// Declara a fila (idempotente) já apontando para a DLQ via dlqArgs. Parâmetros:
 	// durable=true, autoDelete=false, exclusive=false, noWait=false.
 	// Declarar aqui também garante que o consumer funcione mesmo se subir antes do publisher.
-	if _, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil); err != nil {
+	if _, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, dlqArgs); err != nil {
 		ch.Close()
 		conn.Close()
 		return nil, fmt.Errorf("declare queue: %w", err)
@@ -81,6 +92,8 @@ func NewPaymentConsumer(
 		conn:           conn,
 		channel:        ch,
 		queue:          cfg.Queue,
+		maxRetries:     cfg.MaxRetries,
+		retryDelay:     cfg.RetryDelay,
 		processPayment: processPayment,
 	}, nil
 }
@@ -115,8 +128,9 @@ func (c *PaymentConsumer) Start(ctx context.Context) error {
 func (c *PaymentConsumer) handle(ctx context.Context, msg amqp.Delivery) {
 	var event paymentCreatedEvent
 	if err := json.Unmarshal(msg.Body, &event); err != nil {
-		// Mensagem malformada: Nack com requeue=false descarta (evita loop infinito).
-		log.Printf("invalid message, discarding: %v", err)
+		// Mensagem malformada é falha permanente: não adianta retentar. Nack com
+		// requeue=false encaminha para a DLQ (antes era descartada e perdida).
+		log.Printf("invalid message, sending to DLQ: %v", err)
 		_ = msg.Nack(false, false)
 		return
 	}
@@ -128,10 +142,16 @@ func (c *PaymentConsumer) handle(ctx context.Context, msg amqp.Delivery) {
 		Currency:  event.Currency,
 	}
 
-	if _, err := c.processPayment.Execute(ctx, input); err != nil {
-		// Falha no processamento: Nack com requeue=true devolve à fila para nova tentativa.
-		log.Printf("failed to process payment %s, requeueing: %v", event.ID, err)
-		_ = msg.Nack(false, true)
+	// Tenta processar com algumas retentativas (falhas transitórias do PSP/DB).
+	err := processWithRetry(ctx, c.maxRetries, c.retryDelay, func() error {
+		_, execErr := c.processPayment.Execute(ctx, input)
+		return execErr
+	})
+	if err != nil {
+		// Esgotou as tentativas: Nack com requeue=false envia para a DLQ, evitando
+		// o loop infinito ("poison message") do requeue=true.
+		log.Printf("payment %s failed after %d retries, sending to DLQ: %v", event.ID, c.maxRetries, err)
+		_ = msg.Nack(false, false)
 		return
 	}
 

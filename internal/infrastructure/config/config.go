@@ -68,13 +68,15 @@ func (r RedisConfig) Addr() string {
 }
 
 type RabbitMQConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	VHost    string
-	Exchange string
-	Queue    string
+	Host       string
+	Port       string
+	User       string
+	Password   string
+	VHost      string
+	Exchange   string
+	Queue      string
+	MaxRetries int           // tentativas de processamento antes de mandar à DLQ
+	RetryDelay time.Duration // espera entre as tentativas de processamento
 }
 
 func (r RabbitMQConfig) URL() string {
@@ -124,13 +126,15 @@ func Load() Config {
 			Port: envOrDefault("REDIS_PORT", "6379"),
 		},
 		RabbitMQ: RabbitMQConfig{
-			Host:     envOrDefault("RABBITMQ_HOST", "localhost"),
-			Port:     envOrDefault("RABBITMQ_PORT", "5672"),
-			User:     envOrDefault("RABBITMQ_USER", "payment"),
-			Password: envOrDefault("RABBITMQ_PASSWORD", "payment"),
-			VHost:    envOrDefault("RABBITMQ_VHOST", "/"),
-			Exchange: envOrDefault("RABBITMQ_EXCHANGE", "payment.events"),
-			Queue:    envOrDefault("RABBITMQ_QUEUE", "payment.created"),
+			Host:       envOrDefault("RABBITMQ_HOST", "localhost"),
+			Port:       envOrDefault("RABBITMQ_PORT", "5672"),
+			User:       envOrDefault("RABBITMQ_USER", "payment"),
+			Password:   envOrDefault("RABBITMQ_PASSWORD", "payment"),
+			VHost:      envOrDefault("RABBITMQ_VHOST", "/"),
+			Exchange:   envOrDefault("RABBITMQ_EXCHANGE", "payment.events"),
+			Queue:      envOrDefault("RABBITMQ_QUEUE", "payment.created"),
+			MaxRetries: intOrDefault("RABBITMQ_MAX_RETRIES", 3),
+			RetryDelay: durationOrDefault("RABBITMQ_RETRY_DELAY", 2*time.Second),
 		},
 	}
 }

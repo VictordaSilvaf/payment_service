@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -19,10 +20,12 @@ type MessageHandler func(ctx context.Context, routingKey string, body []byte) er
 // liga a uma ou mais routing keys, entregando cada mensagem ao handler. É usado
 // pelo Webhook Service para consumir eventos como "payment.completed".
 type Subscriber struct {
-	conn    *amqp.Connection
-	channel *amqp.Channel
-	queue   string
-	handler MessageHandler
+	conn       *amqp.Connection
+	channel    *amqp.Channel
+	queue      string
+	maxRetries int
+	retryDelay time.Duration
+	handler    MessageHandler
 }
 
 func NewSubscriber(
@@ -49,8 +52,17 @@ func NewSubscriber(
 		return nil, fmt.Errorf("declare exchange: %w", err)
 	}
 
-	// Fila própria e durável para este serviço, isolada da fila de pagamentos.
-	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+	// Declara a DLX + DLQ deste serviço e obtém os argumentos de dead-lettering.
+	dlqArgs, err := declareDLQ(ch, cfg.Exchange, queue)
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, err
+	}
+
+	// Fila própria e durável para este serviço, isolada da fila de pagamentos,
+	// já apontando para a sua DLQ via dlqArgs.
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, dlqArgs); err != nil {
 		ch.Close()
 		conn.Close()
 		return nil, fmt.Errorf("declare queue: %w", err)
@@ -72,7 +84,14 @@ func NewSubscriber(
 		return nil, fmt.Errorf("set qos: %w", err)
 	}
 
-	return &Subscriber{conn: conn, channel: ch, queue: queue, handler: handler}, nil
+	return &Subscriber{
+		conn:       conn,
+		channel:    ch,
+		queue:      queue,
+		maxRetries: cfg.MaxRetries,
+		retryDelay: cfg.RetryDelay,
+		handler:    handler,
+	}, nil
 }
 
 // Start consome e bloqueia até o contexto ser cancelado ou o channel cair.
@@ -96,10 +115,15 @@ func (s *Subscriber) Start(ctx context.Context) error {
 }
 
 func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery) {
-	if err := s.handler(ctx, msg.RoutingKey, msg.Body); err != nil {
-		// Erro de infraestrutura: devolve à fila para nova tentativa.
-		log.Printf("handler error (routing key %s), requeueing: %v", msg.RoutingKey, err)
-		_ = msg.Nack(false, true)
+	// Tenta o handler algumas vezes (erros de infraestrutura costumam ser transitórios).
+	err := processWithRetry(ctx, s.maxRetries, s.retryDelay, func() error {
+		return s.handler(ctx, msg.RoutingKey, msg.Body)
+	})
+	if err != nil {
+		// Esgotou as tentativas: Nack com requeue=false encaminha para a DLQ,
+		// evitando o loop infinito do requeue=true.
+		log.Printf("handler error (routing key %s) after %d retries, sending to DLQ: %v", msg.RoutingKey, s.maxRetries, err)
+		_ = msg.Nack(false, false)
 		return
 	}
 	_ = msg.Ack(false)

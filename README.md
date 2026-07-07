@@ -303,14 +303,18 @@ sequenceDiagram
         Consumer->>RMQ: Ack
     else Erro do PSP (timeout/indisponível)
         PSP-->>UC: error
-        Note over UC: pagamento continua pending
-        Consumer->>RMQ: Nack (reenfileira)
+        Note over UC,Consumer: retenta até RABBITMQ_MAX_RETRIES (pagamento continua pending)
+        alt Ainda dentro do limite
+            Consumer->>RMQ: aguarda RETRY_DELAY e tenta de novo
+        else Esgotou as tentativas
+            Consumer->>RMQ: Nack(requeue=false) → DLQ (payment.created.dlq)
+        end
     end
 ```
 
 > Se o consumer **não estiver rodando**, os eventos ficam acumulados na fila e os pagamentos permanecem em `pending` até um consumer conectar e processá-los.
 
-> A **recusa** do PSP é uma decisão de negócio (não é erro): o pagamento vira `failed` e o evento `payment.failed` é emitido. Já um **erro** do PSP (timeout/indisponível) é transitório: a mensagem é reenfileirada e o pagamento continua `pending` — é aqui que os próximos itens *Retry* e *DLQ* atuarão.
+> A **recusa** do PSP é uma decisão de negócio (não é erro): o pagamento vira `failed` e o evento `payment.failed` é emitido. Já um **erro** do PSP (timeout/indisponível) é transitório: o consumer retenta algumas vezes e, se persistir, manda a mensagem para a **DLQ** em vez de reenfileirar para sempre (ver seção *Dead Letter Queue*).
 
 ### Fluxo assíncrono — Entregar webhook (Webhook Service)
 
@@ -379,7 +383,42 @@ Pontos importantes do desenho:
 - **Auto-contido**: a entrega guarda `event_type` e `payload`, então o retry independe da mensagem original do RabbitMQ. URL e segredo vêm de um *join* com a assinatura (usa a config **atual** do lojista).
 - **Idempotente**: o `X-Webhook-Id` continua determinístico entre tentativas — o lojista deduplica reenvios.
 - **Backoff exponencial**: `base`, `base·2`, `base·4`, ... controlado por `WEBHOOK_RETRY_BASE_DELAY`, evitando martelar um endpoint fora do ar.
-- **Estado terminal `exhausted`**: ao estourar `WEBHOOK_RETRY_MAX_ATTEMPTS`, a entrega sai da fila de retry (é o "beco sem saída" que um DLQ trataria — próximo item do roadmap).
+- **Estado terminal `exhausted`**: ao estourar `WEBHOOK_RETRY_MAX_ATTEMPTS`, a entrega sai da fila de retry — o equivalente à DLQ, porém no nível do banco.
+
+### Fluxo assíncrono — Dead Letter Queue (mensagens do broker)
+
+Enquanto o *Retry de webhook* atua no **banco** (entregas HTTP), a **DLQ** protege o consumo de **mensagens do RabbitMQ**. Antes, uma falha de processamento fazia `Nack(requeue=true)` — a mensagem voltava ao início da fila e podia rodar em loop infinito (*poison message*); e mensagens malformadas eram simplesmente descartadas (perdidas).
+
+Agora, cada fila principal é declarada com uma **Dead Letter Exchange (DLX)** e uma **Dead Letter Queue** (`<fila>.dlq`). O consumer/subscriber retenta o processamento algumas vezes e, se não conseguir, **rejeita sem reenfileirar** (`Nack(requeue=false)`) — o RabbitMQ então roteia a mensagem para a DLQ.
+
+```mermaid
+flowchart LR
+    Ex["Exchange\npayment.events"] -->|payment.created| Q["Fila principal\n(payment.created)"]
+    Q --> C["Consumer"]
+    C -->|sucesso| Ack["Ack ✅"]
+    C -->|"falha transitória"| R["retenta N×\n(RETRY_DELAY entre tentativas)"]
+    R -->|"recuperou"| Ack
+    R -->|"esgotou / malformada"| Nack["Nack(requeue=false)"]
+    Nack -->|dead-letter| DLX["DLX\npayment.events.dlx"]
+    DLX -->|routing key = fila| DLQ["DLQ\npayment.created.dlq\n(parking lot)"]
+```
+
+Como funciona:
+
+- **DLX + DLQ por fila**: `declareDLQ` cria a exchange `<exchange>.dlx` (tipo *direct*) e a fila `<fila>.dlq`, ligadas pela routing key = nome da fila. A fila principal recebe os argumentos `x-dead-letter-exchange` e `x-dead-letter-routing-key`.
+- **Retentativas antes da DLQ**: `RABBITMQ_MAX_RETRIES` tentativas com `RABBITMQ_RETRY_DELAY` entre elas. Só depois de esgotar é que a mensagem vai para a DLQ.
+- **Malformada = falha permanente**: JSON inválido vai **direto** para a DLQ (não adianta retentar), em vez de ser descartado como antes.
+- **Parking lot**: a DLQ é um "estacionamento" sem consumidor automático — dá para inspecionar, corrigir e reprocessar as mensagens manualmente.
+- Vale para as duas filas: `payment.created` (consumer) e `webhook.payment` (webhook service) têm, cada uma, sua DLQ.
+
+> ⚠️ Os argumentos de uma fila são **imutáveis**. Como as filas passaram a ter DLX, uma fila antiga declarada sem esses argumentos causa `PRECONDITION_FAILED` na subida. Em desenvolvimento, recrie o broker limpo: `docker compose down -v` (ou remova as filas pelo painel do RabbitMQ).
+
+Inspecionar/drenar a DLQ pelo painel de gerenciamento (`http://localhost:15672`) ou via CLI:
+
+```bash
+# Quantas mensagens estão paradas em cada DLQ
+docker exec payment_rabbitmq rabbitmqctl list_queues name messages | grep '\.dlq'
+```
 
 ### Infraestrutura Docker
 
@@ -759,6 +798,8 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `RABBITMQ_VHOST` | `/` | Virtual host |
 | `RABBITMQ_EXCHANGE` | `payment.events` | Exchange de eventos |
 | `RABBITMQ_QUEUE` | `payment` | Fila de pagamentos criados |
+| `RABBITMQ_MAX_RETRIES` | `3` | Tentativas de processamento antes de mandar a mensagem à DLQ |
+| `RABBITMQ_RETRY_DELAY` | `2s` | Espera entre as tentativas de processamento |
 | `OUTBOX_POLL_INTERVAL` | `1s` | Intervalo de varredura do relay do outbox |
 | `OUTBOX_BATCH_SIZE` | `100` | Máx. de eventos publicados por ciclo do relay |
 | `WEBHOOK_QUEUE` | `webhook.payment` | Fila do webhook service (ligada a `payment.completed` e `payment.failed`) |
@@ -905,8 +946,8 @@ docker compose down -v
 - [x] Webhook Service (notificações assinadas a lojistas)
 - [x] PSP Mock (autorização aprovada/recusada, base para falhas reais)
 - [x] Retry de entregas de webhook (backoff exponencial + estado `exhausted`)
-- [ ] DLQ para mensagens/entregas que esgotaram as tentativas
-- [ ] Retry da autorização no PSP (backoff no consumer, hoje é requeue imediato)
+- [x] Retry de processamento no consumer + DLQ (DLX por fila, `<fila>.dlq`)
+- [ ] Reprocessamento automático da DLQ (hoje é manual pelo painel/CLI)
 - [ ] Use cases: falhar pagamento
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
@@ -946,7 +987,7 @@ docker compose down -v
 
 ↓
 
-⬜ **Dead Letter Queue** — isola mensagens/entregas que esgotaram as tentativas para análise, sem travar a fila.
+✅ **Dead Letter Queue** — isola mensagens que esgotaram as tentativas (DLX + `<fila>.dlq`) para análise, sem travar a fila nem perder mensagens.
 
 ↓
 

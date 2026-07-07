@@ -70,7 +70,17 @@ func NewPaymentPublisher(cfg config.RabbitMQConfig) (*PaymentPublisher, error) {
 		return nil, fmt.Errorf("declare exchange: %w", err)
 	}
 
-	// Declara a fila (idempotente). Parâmetros:
+	// Declara a DLX + DLQ e obtém os argumentos de dead-lettering. É preciso declarar
+	// a fila principal com os MESMOS argumentos do consumer, senão o RabbitMQ recusa
+	// a redeclaração (PRECONDITION_FAILED) por divergência de argumentos.
+	dlqArgs, err := declareDLQ(ch, cfg.Exchange, cfg.Queue)
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, err
+	}
+
+	// Declara a fila (idempotente) já apontando para a DLQ. Parâmetros:
 	// durable=true, autoDelete=false, exclusive=false, noWait=false.
 	if _, err := ch.QueueDeclare(
 		cfg.Queue,
@@ -78,7 +88,7 @@ func NewPaymentPublisher(cfg config.RabbitMQConfig) (*PaymentPublisher, error) {
 		false,
 		false,
 		false,
-		nil,
+		dlqArgs,
 	); err != nil {
 		ch.Close()
 		conn.Close()
