@@ -3,15 +3,18 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Port     string
-	Postgres PostgresConfig
-	Redis    RedisConfig
-	RabbitMQ RabbitMQConfig
+	Port            string
+	Postgres        PostgresConfig
+	Redis           RedisConfig
+	RabbitMQ        RabbitMQConfig
+	IdempotencyTTL  time.Duration
+	IdempotencyLock time.Duration
 }
 
 type PostgresConfig struct {
@@ -59,8 +62,13 @@ func (r RabbitMQConfig) URL() string {
 func Load() Config {
 	_ = godotenv.Load()
 
+	idempotencyTTL := durationOrDefault("IDEMPOTENCY_TTL", 24*time.Hour)
+	idempotencyLock := durationOrDefault("IDEMPOTENCY_LOCK_TTL", 30*time.Second)
+
 	return Config{
-		Port: envOrDefault("PORT", "8080"),
+		Port:            envOrDefault("PORT", "8080"),
+		IdempotencyTTL:  idempotencyTTL,
+		IdempotencyLock: idempotencyLock,
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),
 			Port:     envOrDefault("POSTGRES_PORT", "5432"),
@@ -89,4 +97,18 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func durationOrDefault(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 
+	"payment_service/internal/application/idempotency"
 	"payment_service/internal/application/usecase"
 	"payment_service/internal/database/migrate"
+	"payment_service/internal/infrastructure/cache/redis"
 	"payment_service/internal/infrastructure/config"
 	"payment_service/internal/infrastructure/http"
 	"payment_service/internal/infrastructure/http/handler"
@@ -28,6 +30,13 @@ func main() {
 	}
 	defer pool.Close()
 
+	redisClient := redis.NewClient(cfg.Redis)
+	defer redisClient.Close()
+
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		log.Fatal(err)
+	}
+
 	publisher, err := rabbitmq.NewPaymentPublisher(cfg.RabbitMQ)
 	if err != nil {
 		log.Fatal(err)
@@ -36,13 +45,25 @@ func main() {
 
 	repo := postgres.NewPaymentRepository(pool)
 
+	idempotencyRepo := redis.NewIdempotencyRepository(
+		redisClient,
+		cfg.IdempotencyLock,
+		cfg.IdempotencyTTL,
+	)
+	idempotencyService := idempotency.NewService(idempotencyRepo)
+
 	createPayment := usecase.NewCreatePayment(repo, publisher)
 	getPayment := usecase.NewGetPayment(repo)
 	listPayment := usecase.NewListPayment(repo)
 
 	router := http.NewRouter(http.RouterConfig{
-		HealthHandler:  handler.NewHealthHandler(),
-		PaymentHandler: handler.NewPaymentHandler(createPayment, getPayment, listPayment),
+		HealthHandler: handler.NewHealthHandler(),
+		PaymentHandler: handler.NewPaymentHandler(
+			createPayment,
+			getPayment,
+			listPayment,
+			idempotencyService,
+		),
 	})
 
 	if err := router.Run(":" + cfg.Port); err != nil {

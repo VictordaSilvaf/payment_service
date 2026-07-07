@@ -1,12 +1,17 @@
 package handler
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"payment_service/internal/application/dto"
+	"payment_service/internal/application/idempotency"
 	"payment_service/internal/application/usecase"
 	"payment_service/internal/domain/payment"
 )
@@ -15,13 +20,20 @@ type PaymentHandler struct {
 	createPayment *usecase.CreatePayment
 	getPayment    *usecase.GetPayment
 	listPayment   *usecase.ListPayment
+	idempotency   *idempotency.Service
 }
 
-func NewPaymentHandler(createPayment *usecase.CreatePayment, getPayment *usecase.GetPayment, listPayment *usecase.ListPayment) *PaymentHandler {
+func NewPaymentHandler(
+	createPayment *usecase.CreatePayment,
+	getPayment *usecase.GetPayment,
+	listPayment *usecase.ListPayment,
+	idempotencyService *idempotency.Service,
+) *PaymentHandler {
 	return &PaymentHandler{
 		createPayment: createPayment,
 		getPayment:    getPayment,
 		listPayment:   listPayment,
+		idempotency:   idempotencyService,
 	}
 }
 
@@ -32,13 +44,42 @@ func (h *PaymentHandler) Create(c *gin.Context) {
 		return
 	}
 
-	result, err := h.createPayment.Execute(c.Request.Context(), req)
+	key, _ := c.Get("idempotency_key")
+	idempotencyKey, _ := key.(string)
+
+	requestHash, err := hashRequest(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+
+	response, err := h.idempotency.Execute(
+		c.Request.Context(),
+		idempotencyKey,
+		requestHash,
+		func(ctx context.Context) (idempotency.CachedResponse, error) {
+			result, execErr := h.createPayment.Execute(ctx, req)
+			if execErr != nil {
+				return idempotency.CachedResponse{}, execErr
+			}
+
+			body, marshalErr := json.Marshal(result)
+			if marshalErr != nil {
+				return idempotency.CachedResponse{}, marshalErr
+			}
+
+			return idempotency.CachedResponse{
+				StatusCode: http.StatusCreated,
+				Body:       body,
+			}, nil
+		},
+	)
 	if err != nil {
 		h.handleError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, result)
+	c.Data(response.StatusCode, "application/json", response.Body)
 }
 
 func (h *PaymentHandler) GetByID(c *gin.Context) {
@@ -74,7 +115,23 @@ func (h *PaymentHandler) handleError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, payment.ErrInvalidAmount):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, idempotency.ErrInvalidKey):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, idempotency.ErrAlreadyProcessing):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, idempotency.ErrKeyAlreadyExists):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
+}
+
+func hashRequest(req dto.CreatePaymentRequest) (string, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
