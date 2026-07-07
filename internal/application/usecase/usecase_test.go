@@ -1,0 +1,159 @@
+package usecase
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"payment_service/internal/application/dto"
+	"payment_service/internal/domain/payment"
+	"payment_service/internal/infrastructure/persistence/memory"
+	"payment_service/internal/testutil"
+)
+
+func TestCreatePaymentExecute(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewPaymentRepository()
+
+	t.Run("success with publisher", func(t *testing.T) {
+		pub := &testutil.MockPublisher{}
+		uc := NewCreatePayment(repo, pub)
+
+		result, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 1000, Currency: "BRL"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.ID == "" || result.Amount != 1000 {
+			t.Fatalf("unexpected result: %+v", result)
+		}
+		if !pub.Called {
+			t.Fatal("expected publisher to be called")
+		}
+	})
+
+	t.Run("success without publisher", func(t *testing.T) {
+		uc := NewCreatePayment(repo, nil)
+		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 2000, Currency: "USD"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid amount", func(t *testing.T) {
+		uc := NewCreatePayment(repo, nil)
+		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 0, Currency: "BRL"})
+		if !errors.Is(err, payment.ErrInvalidAmount) {
+			t.Fatalf("expected ErrInvalidAmount, got %v", err)
+		}
+	})
+
+	t.Run("repository error", func(t *testing.T) {
+		repoErr := errors.New("db down")
+		uc := NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, nil)
+		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 100, Currency: "BRL"})
+		if !errors.Is(err, repoErr) {
+			t.Fatalf("expected repo error, got %v", err)
+		}
+	})
+
+	t.Run("publisher error", func(t *testing.T) {
+		pubErr := errors.New("broker down")
+		uc := NewCreatePayment(repo, &testutil.MockPublisher{Err: pubErr})
+		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 100, Currency: "BRL"})
+		if !errors.Is(err, pubErr) {
+			t.Fatalf("expected publisher error, got %v", err)
+		}
+	})
+}
+
+func TestGetPaymentExecute(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewPaymentRepository()
+	uc := NewGetPayment(repo)
+
+	p, err := payment.New(100, "BRL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("found", func(t *testing.T) {
+		result, err := uc.Execute(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.ID != p.ID {
+			t.Fatalf("expected id %s, got %s", p.ID, result.ID)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, err := uc.Execute(ctx, "missing-id")
+		if !errors.Is(err, payment.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+}
+
+func TestListPaymentExecute(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewPaymentRepository()
+	uc := NewListPayment(repo)
+
+	for i := range 5 {
+		p, err := payment.New(int64(100*(i+1)), "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("default pagination", func(t *testing.T) {
+		result, err := uc.Execute(ctx, "", "", "", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Total != 5 || len(result.Data) != 5 {
+			t.Fatalf("unexpected result: total=%d len=%d", result.Total, len(result.Data))
+		}
+		if result.Page != "1" || result.Limit != "10" {
+			t.Fatalf("unexpected defaults: page=%s limit=%s", result.Page, result.Limit)
+		}
+	})
+
+	t.Run("paginated", func(t *testing.T) {
+		result, err := uc.Execute(ctx, "1", "2", "", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(result.Data) != 2 || result.TotalPages != 3 {
+			t.Fatalf("unexpected pagination: len=%d totalPages=%d", len(result.Data), result.TotalPages)
+		}
+	})
+
+	t.Run("repository error", func(t *testing.T) {
+		repoErr := errors.New("list failed")
+		errorRepo := &testutil.ErrorPaymentRepository{SaveErr: repoErr}
+		errorUC := NewListPayment(errorRepo)
+		_, err := errorUC.Execute(ctx, "1", "10", "", "", "")
+		if !errors.Is(err, repoErr) {
+			t.Fatalf("expected repo error, got %v", err)
+		}
+	})
+}
+
+func TestParsePositiveInt(t *testing.T) {
+	if parsePositiveInt("3", 10) != 3 {
+		t.Fatal("expected 3")
+	}
+	if parsePositiveInt("invalid", 10) != 10 {
+		t.Fatal("expected fallback")
+	}
+	if parsePositiveInt("-1", 10) != 10 {
+		t.Fatal("expected fallback for negative")
+	}
+}
