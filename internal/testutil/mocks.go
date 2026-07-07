@@ -73,6 +73,10 @@ func (r *ErrorPaymentRepository) Save(_ context.Context, _ *payment.Payment) err
 	return r.SaveErr
 }
 
+func (r *ErrorPaymentRepository) Update(_ context.Context, _ *payment.Payment) error {
+	return r.SaveErr
+}
+
 func (r *ErrorPaymentRepository) FindByID(_ context.Context, _ string) (*payment.Payment, error) {
 	return nil, payment.ErrNotFound
 }

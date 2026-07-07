@@ -32,6 +32,21 @@ func (r *PaymentRepository) Save(ctx context.Context, p *payment.Payment) error 
 	return nil
 }
 
+func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE payments
+		SET amount = $2, currency = $3, status = $4
+		WHERE id = $1
+	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status))
+	if err != nil {
+		return fmt.Errorf("update payment: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return payment.ErrNotFound
+	}
+	return nil
+}
+
 func (r *PaymentRepository) FindByID(ctx context.Context, id string) (*payment.Payment, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, amount, currency, status, created_at

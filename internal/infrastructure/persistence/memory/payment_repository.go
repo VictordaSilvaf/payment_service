@@ -53,6 +53,18 @@ func (r *PaymentRepository) Save(_ context.Context, p *payment.Payment) error {
 	return nil
 }
 
+func (r *PaymentRepository) Update(_ context.Context, p *payment.Payment) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.payments[p.ID]; !ok {
+		return payment.ErrNotFound
+	}
+
+	r.payments[p.ID] = p
+	return nil
+}
+
 func (r *PaymentRepository) FindByID(_ context.Context, id string) (*payment.Payment, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

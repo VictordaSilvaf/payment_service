@@ -146,6 +146,77 @@ func TestListPaymentExecute(t *testing.T) {
 	})
 }
 
+func TestProcessPaymentExecute(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success completes payment", func(t *testing.T) {
+		repo := memory.NewPaymentRepository()
+		p, err := payment.New(1000, "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+
+		uc := NewProcessPayment(repo)
+		out, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID, Amount: 1000, Currency: "BRL"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out.Status != string(payment.StatusCompleted) {
+			t.Fatalf("expected completed, got %s", out.Status)
+		}
+
+		stored, err := repo.FindByID(ctx, p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Status != payment.StatusCompleted {
+			t.Fatalf("expected stored payment completed, got %s", stored.Status)
+		}
+	})
+
+	t.Run("payment not found", func(t *testing.T) {
+		repo := memory.NewPaymentRepository()
+		uc := NewProcessPayment(repo)
+
+		_, err := uc.Execute(ctx, ProcessPaymentInput{PaymentID: "missing-id"})
+		if !errors.Is(err, payment.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("update error", func(t *testing.T) {
+		base := memory.NewPaymentRepository()
+		p, err := payment.New(1000, "BRL")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := base.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+
+		updateErr := errors.New("update failed")
+		repo := &updateErrorRepo{PaymentRepository: base, updateErr: updateErr}
+
+		uc := NewProcessPayment(repo)
+		_, err = uc.Execute(ctx, ProcessPaymentInput{PaymentID: p.ID})
+		if !errors.Is(err, updateErr) {
+			t.Fatalf("expected update error, got %v", err)
+		}
+	})
+}
+
+type updateErrorRepo struct {
+	*memory.PaymentRepository
+	updateErr error
+}
+
+func (r *updateErrorRepo) Update(_ context.Context, _ *payment.Payment) error {
+	return r.updateErr
+}
+
 func TestParsePositiveInt(t *testing.T) {
 	if parsePositiveInt("3", 10) != 3 {
 		t.Fatal("expected 3")
