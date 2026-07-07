@@ -1,0 +1,16 @@
+root = "."
+tmp_dir = "tmp_outbox"
+
+[build]
+  cmd = "go mod download && go build -buildvcs=false -o ./tmp_outbox/outbox ./cmd/outbox"
+  entrypoint = "./tmp_outbox/outbox"
+  include_ext = ["go"]
+  exclude_dir = ["tmp", "tmp_consumer", "tmp_outbox", "vendor"]
+  delay = 500
+  stop_on_error = true
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

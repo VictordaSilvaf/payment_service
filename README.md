@@ -31,6 +31,8 @@ Principais capacidades:
 - **Persistência** no PostgreSQL (adapter `pgx`)
 - **Idempotência** no `POST /payments` via Redis (header `Idempotency-Key`)
 - **Eventos** publicados no RabbitMQ ao criar um pagamento (`payment.created`)
+- **Outbox Pattern**: o evento é gravado na mesma transação do pagamento e publicado depois por um relay (sem dual-write)
+- **Consumer** assíncrono que consome `payment.created` e conclui o pagamento (`pending` → `completed`)
 - **Testes** com cobertura mínima de 80% nos pacotes de negócio
 
 ---
@@ -115,6 +117,8 @@ flowchart TB
 payment_service/
 ├── cmd/
 │   ├── api/main.go                          # Composition root da API
+│   ├── consumer/main.go                     # Composition root do consumer RabbitMQ
+│   ├── outbox/main.go                       # Composition root do relay do outbox
 │   ├── migrate/main.go                      # CLI de migrations
 │   └── seed/main.go                         # CLI de seeders
 ├── db/migrations/                           # SQL versionado (golang-migrate)
@@ -127,9 +131,13 @@ payment_service/
 │   │   ├── publisher.go                     # Porta EventPublisher
 │   │   ├── errors.go
 │   │   └── repository.go                    # Porta Repository
+│   ├── domain/outbox/                       # Evento e porta do Outbox
+│   │   ├── event.go                         # Modelo Event
+│   │   └── repository.go                    # Porta Repository
 │   ├── application/
 │   │   ├── dto/                             # Objetos de transferência
 │   │   ├── idempotency/                     # Serviço e contratos de idempotência
+│   │   ├── outbox/                          # Relay (dispatcher) + porta Publisher
 │   │   ├── payment/                         # Mapper e validator
 │   │   └── usecase/                         # Casos de uso
 │   ├── database/
@@ -143,13 +151,15 @@ payment_service/
 │       ├── http/                            # Router, handlers, middleware
 │       ├── messaging/rabbitmq/              # Adapter RabbitMQ (eventos)
 │       └── persistence/
-│           ├── postgres/                    # Adapter PostgreSQL (produção)
+│           ├── postgres/                    # Adapter PostgreSQL (payments, outbox, TxManager)
 │           └── memory/                      # Adapter in-memory (testes)
 ├── docker-compose.yml                       # Orquestração (produção)
 ├── docker-compose.override.yml              # Hot-reload (dev, auto-carregado)
-├── Dockerfile                               # Build de produção
+├── Dockerfile                               # Build de produção (API + consumer + outbox)
 ├── Dockerfile.dev                           # Build de desenvolvimento (Air)
-├── .air.toml                                # Configuração do hot-reload
+├── .air.toml                                # Hot-reload da API
+├── .air.consumer.toml                       # Hot-reload do consumer
+├── .air.outbox.toml                         # Hot-reload do relay do outbox
 └── Makefile                                 # Atalhos (migrate, seed, test, run)
 ```
 
@@ -168,8 +178,9 @@ sequenceDiagram
     participant Redis as Redis
     participant UC as CreatePayment
     participant Domain as payment.New()
+    participant TX as TxManager
     participant Repo as PostgresRepository
-    participant RMQ as RabbitMQ
+    participant Outbox as OutboxRepository
     participant DB as PostgreSQL
 
     Client->>MW: POST /api/v1/payments\nIdempotency-Key: uuid
@@ -186,9 +197,12 @@ sequenceDiagram
         IDEM->>UC: Execute(ctx, request)
         UC->>Domain: New(amount, currency)
         Domain-->>UC: *Payment
-        UC->>Repo: Save(ctx, payment)
+        UC->>TX: WithinTx(ctx, fn)
+        TX->>Repo: Save(ctx, payment)
         Repo->>DB: INSERT INTO payments
-        UC->>RMQ: PublishCreated(payment)
+        TX->>Outbox: Add(ctx, event)
+        Outbox->>DB: INSERT INTO outbox_events
+        Note over TX,DB: mesma transação (atômico)
         UC-->>IDEM: PaymentResponse
         IDEM->>Redis: Save(key, response)
         IDEM->>Redis: Unlock(key)
@@ -218,6 +232,57 @@ sequenceDiagram
     Handler-->>Client: 200 OK
 ```
 
+### Fluxo assíncrono — Publicar evento (Outbox Relay)
+
+```mermaid
+sequenceDiagram
+    participant Relay as Outbox Relay
+    participant Outbox as OutboxRepository
+    participant DB as PostgreSQL
+    participant RMQ as RabbitMQ
+
+    loop a cada OUTBOX_POLL_INTERVAL
+        Relay->>Outbox: FetchUnpublished(batch)
+        Outbox->>DB: SELECT ... WHERE published_at IS NULL
+        DB-->>Relay: eventos pendentes
+        loop cada evento
+            Relay->>RMQ: Publish(routingKey, payload)
+            Relay->>Outbox: MarkPublished(id)
+            Outbox->>DB: UPDATE outbox_events SET published_at
+        end
+    end
+```
+
+> Entrega **at-least-once**: se o relay cair após publicar e antes de marcar, o evento é republicado no próximo ciclo. Por isso o consumer deve ser idempotente.
+
+### Fluxo assíncrono — Processar pagamento (consumer)
+
+```mermaid
+sequenceDiagram
+    participant RMQ as RabbitMQ (fila payment)
+    participant Consumer as PaymentConsumer
+    participant UC as ProcessPayment
+    participant Domain as payment.Complete()
+    participant Repo as PostgresRepository
+    participant DB as PostgreSQL
+
+    RMQ->>Consumer: entrega payment.created
+    Consumer->>UC: Execute(ctx, event)
+    UC->>Repo: FindByID(ctx, id)
+    Repo->>DB: SELECT ... WHERE id
+    UC->>Domain: Complete()
+    Domain-->>UC: status = completed
+    UC->>Repo: Update(ctx, payment)
+    Repo->>DB: UPDATE payments SET status
+    alt Sucesso
+        Consumer->>RMQ: Ack (remove da fila)
+    else Falha
+        Consumer->>RMQ: Nack (reenfileira)
+    end
+```
+
+> Se o consumer **não estiver rodando**, os eventos ficam acumulados na fila e os pagamentos permanecem em `pending` até um consumer conectar e processá-los.
+
 ### Infraestrutura Docker
 
 ```mermaid
@@ -228,6 +293,8 @@ flowchart LR
 
     subgraph Docker["Docker Compose"]
         API["payment_api\n(Go + Air)"]
+        Outbox["payment_outbox\n(Go + Air)"]
+        Consumer["payment_consumer\n(Go + Air)"]
         PG["payment_postgres\n(PostgreSQL 16)"]
         RD["payment_redis\n(Redis 7)"]
         RMQ["payment_rabbitmq\n(RabbitMQ 3.13)"]
@@ -236,7 +303,10 @@ flowchart LR
     Client -->|:8080| API
     API -->|:5432| PG
     API -->|:6379| RD
-    API -->|:5672| RMQ
+    Outbox -->|lê pendentes :5432| PG
+    Outbox -->|publica :5672| RMQ
+    RMQ -->|consome| Consumer
+    Consumer -->|:5432| PG
 
     PG --- VolPG[("postgres_data\n(volume)")]
     RD --- VolRD[("redis_data\n(volume)")]
@@ -389,6 +459,12 @@ O arquivo `docker-compose.override.yml` é carregado automaticamente e configura
 ```bash
 # Ver logs da API
 docker compose logs -f api
+
+# Ver logs do relay do outbox
+docker compose logs -f outbox
+
+# Ver logs do consumer
+docker compose logs -f consumer
 ```
 
 > Se o build falhar com `error obtaining VCS status`, o `.air.toml` já inclui `-buildvcs=false` para contornar isso dentro do Docker.
@@ -418,6 +494,12 @@ make seed
 
 # Rodar a API
 go run ./cmd/api
+
+# Em outro terminal, rodar o relay do outbox (publica os eventos)
+go run ./cmd/outbox
+
+# Em outro terminal, rodar o consumer (processa os eventos)
+go run ./cmd/consumer
 ```
 
 ---
@@ -512,9 +594,9 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `APP_PORT` | `8080` | Porta exposta no host (Docker) |
 | `POSTGRES_HOST` | `localhost` | Host do PostgreSQL |
 | `POSTGRES_PORT` | `5432` | Porta do PostgreSQL |
-| `POSTGRES_USER` | `wallet` | Usuário do banco |
-| `POSTGRES_PASSWORD` | `wallet` | Senha do banco |
-| `POSTGRES_DB` | `wallet_db` | Nome do banco |
+| `POSTGRES_USER` | `payment` | Usuário do banco |
+| `POSTGRES_PASSWORD` | `payment` | Senha do banco |
+| `POSTGRES_DB` | `payment_db` | Nome do banco |
 | `REDIS_HOST` | `localhost` | Host do Redis |
 | `REDIS_PORT` | `6379` | Porta do Redis |
 | `IDEMPOTENCY_TTL` | `24h` | TTL da resposta idempotente no Redis |
@@ -522,11 +604,13 @@ Copie `.env.example` para `.env` e ajuste conforme necessário.
 | `RABBITMQ_HOST` | `localhost` | Host do RabbitMQ |
 | `RABBITMQ_PORT` | `5672` | Porta AMQP |
 | `RABBITMQ_MANAGEMENT_PORT` | `15672` | Porta do painel web |
-| `RABBITMQ_USER` | `wallet` | Usuário RabbitMQ |
-| `RABBITMQ_PASSWORD` | `wallet` | Senha RabbitMQ |
+| `RABBITMQ_USER` | `payment` | Usuário RabbitMQ |
+| `RABBITMQ_PASSWORD` | `payment` | Senha RabbitMQ |
 | `RABBITMQ_VHOST` | `/` | Virtual host |
-| `RABBITMQ_EXCHANGE` | `wallet.events` | Exchange de eventos |
-| `RABBITMQ_QUEUE` | `wallet` | Fila de pagamentos criados |
+| `RABBITMQ_EXCHANGE` | `payment.events` | Exchange de eventos |
+| `RABBITMQ_QUEUE` | `payment` | Fila de pagamentos criados |
+| `OUTBOX_POLL_INTERVAL` | `1s` | Intervalo de varredura do relay do outbox |
+| `OUTBOX_BATCH_SIZE` | `100` | Máx. de eventos publicados por ciclo do relay |
 | `SEED_COUNT` | `25` | Quantidade padrão de registros no seeder |
 
 > Dentro do Docker Compose, use os nomes dos serviços: `POSTGRES_HOST=postgres`, `REDIS_HOST=redis`, `RABBITMQ_HOST=rabbitmq`.
@@ -547,16 +631,26 @@ CREATE TABLE payments (
     status      VARCHAR(20) NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Outbox Pattern: eventos gravados na mesma transação do pagamento
+CREATE TABLE outbox_events (
+    id            UUID PRIMARY KEY,
+    aggregate_id  UUID NOT NULL,          -- id do pagamento
+    event_type    VARCHAR(50) NOT NULL,   -- "payment.created"
+    payload       JSONB NOT NULL,         -- corpo do evento
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at  TIMESTAMPTZ             -- NULL = ainda não publicado
+);
 ```
 
 Os dados ficam no volume Docker `postgres_data` e **persistem** entre restarts da API.
 
 ```bash
 # Acessar o banco
-docker exec -it payment_postgres psql -U wallet -d wallet_db
+docker exec -it payment_postgres psql -U payment -d payment_db
 
 # Verificar migrations
-docker exec -it payment_postgres psql -U wallet -d wallet_db -c "SELECT * FROM schema_migrations;"
+docker exec -it payment_postgres psql -U payment -d payment_db -c "SELECT * FROM schema_migrations;"
 ```
 
 ---
@@ -568,9 +662,13 @@ docker exec -it payment_postgres psql -U wallet -d wallet_db -c "SELECT * FROM s
 | Serviço | Container | Porta | Descrição |
 |---|---|---|---|
 | `api` | `payment_api` | 8080 | API Go |
+| `outbox` | `payment_outbox` | — | Relay: publica eventos pendentes da tabela `outbox_events` |
+| `consumer` | `payment_consumer` | — | Consome `payment.created` e conclui pagamentos |
 | `postgres` | `payment_postgres` | 5432 | Banco de dados |
 | `redis` | `payment_redis` | 6379 | Idempotência |
 | `rabbitmq` | `payment_rabbitmq` | 5672 / 15672 | Mensageria + painel web |
+
+> Sempre suba a stack completa com `docker compose up -d` (sem nomear serviços) para garantir que `outbox` e `consumer` também iniciem. Sem o `outbox`, os eventos ficam presos na tabela `outbox_events` (nunca chegam ao broker); sem o `consumer`, ficam presos na fila. Nos dois casos o pagamento não sai de `pending`.
 
 Painel RabbitMQ: [http://localhost:15672](http://localhost:15672) (credenciais conforme `.env`)
 
@@ -578,13 +676,19 @@ Painel RabbitMQ: [http://localhost:15672](http://localhost:15672) (credenciais c
 
 | Evento | Exchange | Routing key | Payload |
 |---|---|---|---|
-| Pagamento criado | `wallet.events` | `payment.created` | `{ id, amount, currency, status, created_at }` |
+| Pagamento criado | `payment.events` | `payment.created` | `{ id, amount, currency, status, created_at }` |
 
 ### Comandos úteis
 
 ```bash
-# Subir tudo
+# Subir tudo (inclui o consumer)
 docker compose up -d
+
+# Conferir se outbox e consumer estão de pé
+docker compose ps outbox consumer
+
+# Ver logs do relay e do consumer
+docker compose logs -f outbox consumer
 
 # Rebuild apenas a API
 docker compose up -d --build api
@@ -607,8 +711,9 @@ docker compose down -v
 
 ## Próximos passos
 
-- [ ] Consumer RabbitMQ (processar eventos assíncronos)
-- [ ] Use cases: completar/falhar pagamento
+- [x] Consumer RabbitMQ (processar eventos assíncronos)
+- [x] Outbox Pattern (publicação transacional de eventos)
+- [ ] Use cases: falhar pagamento
 - [ ] Endpoint DELETE exposto na API
 - [ ] Testes de integração com PostgreSQL e RabbitMQ
 - [ ] CI/CD pipeline
@@ -627,11 +732,11 @@ docker compose down -v
 
 ↓
 
-⬜ Rabbit Consumer
+✅ Rabbit Consumer
 
 ↓
 
-⬜ Outbox Pattern
+✅ Outbox Pattern
 
 ↓
 
@@ -655,7 +760,7 @@ docker compose down -v
 
 ↓
 
-⬜ Wallet Service
+⬜ payment Service
 
 ↓
 

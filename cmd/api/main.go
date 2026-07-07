@@ -11,7 +11,6 @@ import (
 	"payment_service/internal/infrastructure/config"
 	"payment_service/internal/infrastructure/http"
 	"payment_service/internal/infrastructure/http/handler"
-	"payment_service/internal/infrastructure/messaging/rabbitmq"
 	"payment_service/internal/infrastructure/persistence/postgres"
 )
 
@@ -37,13 +36,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	publisher, err := rabbitmq.NewPaymentPublisher(cfg.RabbitMQ)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer publisher.Close()
-
 	repo := postgres.NewPaymentRepository(pool)
+	outboxRepo := postgres.NewOutboxRepository(pool)
+	txManager := postgres.NewTxManager(pool)
 
 	idempotencyRepo := redis.NewIdempotencyRepository(
 		redisClient,
@@ -52,7 +47,7 @@ func main() {
 	)
 	idempotencyService := idempotency.NewService(idempotencyRepo)
 
-	createPayment := usecase.NewCreatePayment(repo, publisher)
+	createPayment := usecase.NewCreatePayment(repo, outboxRepo, txManager)
 	getPayment := usecase.NewGetPayment(repo)
 	listPayment := usecase.NewListPayment(repo)
 

@@ -26,7 +26,7 @@ func setupPaymentRouter(t *testing.T) *gin.Engine {
 	repo := memory.NewPaymentRepository()
 	idempotencyService := idempotency.NewService(testutil.NewMemoryIdempotencyRepo())
 	paymentHandler := NewPaymentHandler(
-		usecase.NewCreatePayment(repo, nil),
+		usecase.NewCreatePayment(repo, memory.NewOutboxRepository(), nil),
 		usecase.NewGetPayment(repo),
 		usecase.NewListPayment(repo),
 		idempotencyService,
@@ -220,7 +220,7 @@ func TestPaymentHandlerCreateInternalError(t *testing.T) {
 	repoErr := fmt.Errorf("db unavailable")
 	idempotencyService := idempotency.NewService(testutil.NewMemoryIdempotencyRepo())
 	paymentHandler := NewPaymentHandler(
-		usecase.NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, nil),
+		usecase.NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, memory.NewOutboxRepository(), nil),
 		usecase.NewGetPayment(memory.NewPaymentRepository()),
 		usecase.NewListPayment(memory.NewPaymentRepository()),
 		idempotencyService,
@@ -246,7 +246,7 @@ func TestPaymentHandlerListInternalError(t *testing.T) {
 
 	repoErr := fmt.Errorf("list unavailable")
 	paymentHandler := NewPaymentHandler(
-		usecase.NewCreatePayment(memory.NewPaymentRepository(), nil),
+		usecase.NewCreatePayment(memory.NewPaymentRepository(), memory.NewOutboxRepository(), nil),
 		usecase.NewGetPayment(memory.NewPaymentRepository()),
 		usecase.NewListPayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}),
 		idempotency.NewService(testutil.NewMemoryIdempotencyRepo()),

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -15,6 +16,12 @@ type Config struct {
 	RabbitMQ        RabbitMQConfig
 	IdempotencyTTL  time.Duration
 	IdempotencyLock time.Duration
+	Outbox          OutboxConfig
+}
+
+type OutboxConfig struct {
+	PollInterval time.Duration
+	BatchSize    int
 }
 
 type PostgresConfig struct {
@@ -69,6 +76,10 @@ func Load() Config {
 		Port:            envOrDefault("PORT", "8080"),
 		IdempotencyTTL:  idempotencyTTL,
 		IdempotencyLock: idempotencyLock,
+		Outbox: OutboxConfig{
+			PollInterval: durationOrDefault("OUTBOX_POLL_INTERVAL", time.Second),
+			BatchSize:    intOrDefault("OUTBOX_BATCH_SIZE", 100),
+		},
 		Postgres: PostgresConfig{
 			Host:     envOrDefault("POSTGRES_HOST", "localhost"),
 			Port:     envOrDefault("POSTGRES_PORT", "5432"),
@@ -97,6 +108,20 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func intOrDefault(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+
+	return parsed
 }
 
 func durationOrDefault(key string, fallback time.Duration) time.Duration {

@@ -1,4 +1,8 @@
-.PHONY: migrate-up migrate-down migrate-version seed seed-fresh run test test-coverage
+.PHONY: migrate-create migrate-up migrate-down migrate-version seed seed-fresh run test test-coverage
+
+migrate-create:
+	@if [ -z "$(name)" ]; then echo "usage: make migrate-create name=<migration_name>"; exit 1; fi
+	go run ./cmd/migrate create "$(name)"
 
 migrate-up:
 	go run ./cmd/migrate up

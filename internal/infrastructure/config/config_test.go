@@ -40,9 +40,9 @@ func TestRabbitMQURL(t *testing.T) {
 
 	t.Run("custom vhost", func(t *testing.T) {
 		url := RabbitMQConfig{
-			Host: "localhost", Port: "5672", User: "u", Password: "p", VHost: "wallet",
+			Host: "localhost", Port: "5672", User: "u", Password: "p", VHost: "payment",
 		}.URL()
-		if url != "amqp://u:p@localhost:5672/wallet" {
+		if url != "amqp://u:p@localhost:5672/payment" {
 			t.Fatalf("unexpected url: %s", url)
 		}
 	})
@@ -50,7 +50,7 @@ func TestRabbitMQURL(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	t.Setenv("PORT", "9090")
-	t.Setenv("POSTGRES_USER", "wallet")
+	t.Setenv("POSTGRES_USER", "payment")
 	t.Setenv("IDEMPOTENCY_TTL", "2h")
 	t.Setenv("IDEMPOTENCY_LOCK_TTL", "invalid")
 
@@ -59,8 +59,8 @@ func TestLoad(t *testing.T) {
 	if cfg.Port != "9090" {
 		t.Fatalf("expected port 9090, got %s", cfg.Port)
 	}
-	if cfg.Postgres.User != "wallet" {
-		t.Fatalf("expected postgres user wallet, got %s", cfg.Postgres.User)
+	if cfg.Postgres.User != "payment" {
+		t.Fatalf("expected postgres user payment, got %s", cfg.Postgres.User)
 	}
 	if cfg.IdempotencyTTL != 2*time.Hour {
 		t.Fatalf("expected 2h ttl, got %s", cfg.IdempotencyTTL)

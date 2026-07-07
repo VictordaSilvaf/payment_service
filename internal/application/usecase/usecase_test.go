@@ -6,18 +6,37 @@ import (
 	"testing"
 
 	"payment_service/internal/application/dto"
+	"payment_service/internal/domain/outbox"
 	"payment_service/internal/domain/payment"
 	"payment_service/internal/infrastructure/persistence/memory"
 	"payment_service/internal/testutil"
 )
 
+// passthroughTx executa a função direto, sem transação real (para testes).
+type passthroughTx struct{}
+
+func (passthroughTx) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
+}
+
+// errorOutboxRepo falha ao gravar o evento, para testar o rollback lógico.
+type errorOutboxRepo struct {
+	addErr error
+}
+
+func (r *errorOutboxRepo) Add(_ context.Context, _ outbox.Event) error { return r.addErr }
+func (r *errorOutboxRepo) FetchUnpublished(_ context.Context, _ int) ([]outbox.Event, error) {
+	return nil, nil
+}
+func (r *errorOutboxRepo) MarkPublished(_ context.Context, _ string) error { return nil }
+
 func TestCreatePaymentExecute(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewPaymentRepository()
 
-	t.Run("success with publisher", func(t *testing.T) {
-		pub := &testutil.MockPublisher{}
-		uc := NewCreatePayment(repo, pub)
+	t.Run("success writes payment and outbox event", func(t *testing.T) {
+		repo := memory.NewPaymentRepository()
+		outboxRepo := memory.NewOutboxRepository()
+		uc := NewCreatePayment(repo, outboxRepo, passthroughTx{})
 
 		result, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 1000, Currency: "BRL"})
 		if err != nil {
@@ -26,13 +45,21 @@ func TestCreatePaymentExecute(t *testing.T) {
 		if result.ID == "" || result.Amount != 1000 {
 			t.Fatalf("unexpected result: %+v", result)
 		}
-		if !pub.Called {
-			t.Fatal("expected publisher to be called")
+
+		events, err := outboxRepo.FetchUnpublished(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected 1 outbox event, got %d", len(events))
+		}
+		if events[0].Type != eventPaymentCreated || events[0].AggregateID != result.ID {
+			t.Fatalf("unexpected outbox event: %+v", events[0])
 		}
 	})
 
-	t.Run("success without publisher", func(t *testing.T) {
-		uc := NewCreatePayment(repo, nil)
+	t.Run("success without tx manager", func(t *testing.T) {
+		uc := NewCreatePayment(memory.NewPaymentRepository(), memory.NewOutboxRepository(), nil)
 		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 2000, Currency: "USD"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -40,7 +67,7 @@ func TestCreatePaymentExecute(t *testing.T) {
 	})
 
 	t.Run("invalid amount", func(t *testing.T) {
-		uc := NewCreatePayment(repo, nil)
+		uc := NewCreatePayment(memory.NewPaymentRepository(), memory.NewOutboxRepository(), nil)
 		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 0, Currency: "BRL"})
 		if !errors.Is(err, payment.ErrInvalidAmount) {
 			t.Fatalf("expected ErrInvalidAmount, got %v", err)
@@ -49,19 +76,19 @@ func TestCreatePaymentExecute(t *testing.T) {
 
 	t.Run("repository error", func(t *testing.T) {
 		repoErr := errors.New("db down")
-		uc := NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, nil)
+		uc := NewCreatePayment(&testutil.ErrorPaymentRepository{SaveErr: repoErr}, memory.NewOutboxRepository(), passthroughTx{})
 		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 100, Currency: "BRL"})
 		if !errors.Is(err, repoErr) {
 			t.Fatalf("expected repo error, got %v", err)
 		}
 	})
 
-	t.Run("publisher error", func(t *testing.T) {
-		pubErr := errors.New("broker down")
-		uc := NewCreatePayment(repo, &testutil.MockPublisher{Err: pubErr})
+	t.Run("outbox error", func(t *testing.T) {
+		outboxErr := errors.New("outbox down")
+		uc := NewCreatePayment(memory.NewPaymentRepository(), &errorOutboxRepo{addErr: outboxErr}, passthroughTx{})
 		_, err := uc.Execute(ctx, dto.CreatePaymentRequest{Amount: 100, Currency: "BRL"})
-		if !errors.Is(err, pubErr) {
-			t.Fatalf("expected publisher error, got %v", err)
+		if !errors.Is(err, outboxErr) {
+			t.Fatalf("expected outbox error, got %v", err)
 		}
 	})
 }

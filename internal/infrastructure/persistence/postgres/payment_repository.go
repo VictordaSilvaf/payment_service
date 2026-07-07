@@ -21,8 +21,13 @@ func NewPaymentRepository(pool *pgxpool.Pool) *PaymentRepository {
 	return &PaymentRepository{pool: pool}
 }
 
+// db devolve a transação ativa no contexto (se houver) ou o pool.
+func (r *PaymentRepository) db(ctx context.Context) executor {
+	return execFromContext(ctx, r.pool)
+}
+
 func (r *PaymentRepository) Save(ctx context.Context, p *payment.Payment) error {
-	_, err := r.pool.Exec(ctx, `
+	_, err := r.db(ctx).Exec(ctx, `
 		INSERT INTO payments (id, amount, currency, status, created_at)
 		VALUES ($1, $2, $3, $4, $5)
 	`, p.ID, p.Money.Amount, p.Money.Currency, string(p.Status), p.CreatedAt)
@@ -33,7 +38,7 @@ func (r *PaymentRepository) Save(ctx context.Context, p *payment.Payment) error 
 }
 
 func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) error {
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := r.db(ctx).Exec(ctx, `
 		UPDATE payments
 		SET amount = $2, currency = $3, status = $4
 		WHERE id = $1
@@ -48,7 +53,7 @@ func (r *PaymentRepository) Update(ctx context.Context, p *payment.Payment) erro
 }
 
 func (r *PaymentRepository) FindByID(ctx context.Context, id string) (*payment.Payment, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db(ctx).QueryRow(ctx, `
 		SELECT id, amount, currency, status, created_at
 		FROM payments
 		WHERE id = $1
@@ -76,7 +81,7 @@ func (r *PaymentRepository) FindAll(ctx context.Context, page, limit, sort, orde
 
 	var total int
 	countQuery := `SELECT COUNT(*) FROM payments ` + whereClause
-	if err := r.pool.QueryRow(ctx, countQuery, search).Scan(&total); err != nil {
+	if err := r.db(ctx).QueryRow(ctx, countQuery, search).Scan(&total); err != nil {
 		return nil, fmt.Errorf("count payments: %w", err)
 	}
 
@@ -88,7 +93,7 @@ func (r *PaymentRepository) FindAll(ctx context.Context, page, limit, sort, orde
 		LIMIT $2 OFFSET $3
 	`, whereClause, sortColumn, sortOrder)
 
-	rows, err := r.pool.Query(ctx, query, search, limitNum, offset)
+	rows, err := r.db(ctx).Query(ctx, query, search, limitNum, offset)
 	if err != nil {
 		return nil, fmt.Errorf("find all payments: %w", err)
 	}
@@ -111,7 +116,7 @@ func (r *PaymentRepository) FindAll(ctx context.Context, page, limit, sort, orde
 }
 
 func (r *PaymentRepository) Delete(ctx context.Context, id string) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM payments WHERE id = $1`, id)
+	tag, err := r.db(ctx).Exec(ctx, `DELETE FROM payments WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete payment: %w", err)
 	}
@@ -122,7 +127,7 @@ func (r *PaymentRepository) Delete(ctx context.Context, id string) error {
 }
 
 func (r *PaymentRepository) Truncate(ctx context.Context) error {
-	_, err := r.pool.Exec(ctx, `TRUNCATE TABLE payments`)
+	_, err := r.db(ctx).Exec(ctx, `TRUNCATE TABLE payments`)
 	if err != nil {
 		return fmt.Errorf("truncate payments: %w", err)
 	}

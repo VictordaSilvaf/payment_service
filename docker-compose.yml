@@ -57,6 +57,34 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  outbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: payment_outbox
+    restart: unless-stopped
+    command: ["./outbox"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-payment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payment}
+      POSTGRES_DB: ${POSTGRES_DB:-payment_db}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-payment}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-payment}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-payment.events}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-payment.created}
+      OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-1s}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
     container_name: payment_postgres

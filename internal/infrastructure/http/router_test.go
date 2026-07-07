@@ -23,7 +23,7 @@ func TestNewRouter(t *testing.T) {
 	router := NewRouter(RouterConfig{
 		HealthHandler: handler.NewHealthHandler(),
 		PaymentHandler: handler.NewPaymentHandler(
-			usecase.NewCreatePayment(repo, nil),
+			usecase.NewCreatePayment(repo, memory.NewOutboxRepository(), nil),
 			usecase.NewGetPayment(repo),
 			usecase.NewListPayment(repo),
 			idempotencyService,

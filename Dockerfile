@@ -11,6 +11,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /api ./cmd/api
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /consumer ./cmd/consumer
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /outbox ./cmd/outbox
 
 FROM alpine:3.21
 
@@ -20,6 +21,7 @@ WORKDIR /app
 
 COPY --from=builder /api .
 COPY --from=builder /consumer .
+COPY --from=builder /outbox .
 
 EXPOSE 8080
 

@@ -116,9 +116,16 @@ func (p *PaymentPublisher) PublishCreated(ctx context.Context, pay *payment.Paym
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
+	return p.Publish(ctx, routingKey, body)
+}
+
+// Publish envia um corpo já serializado para a exchange usando a routing key
+// informada. É o método usado pelo Outbox Relay, que lê o payload cru da tabela
+// outbox_events e o publica sem reconstruir a entidade de domínio.
+func (p *PaymentPublisher) Publish(ctx context.Context, routingKey string, body []byte) error {
 	// Publica na exchange com a routing key. Parâmetros: mandatory=false, immediate=false.
 	// DeliveryMode=Persistent grava a mensagem em disco, sobrevivendo a restart do broker.
-	err = p.channel.PublishWithContext(ctx, p.exchange, routingKey, false, false, amqp.Publishing{
+	err := p.channel.PublishWithContext(ctx, p.exchange, routingKey, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Timestamp:    time.Now().UTC(),
@@ -127,7 +134,6 @@ func (p *PaymentPublisher) PublishCreated(ctx context.Context, pay *payment.Paym
 	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}
-
 	return nil
 }
 
